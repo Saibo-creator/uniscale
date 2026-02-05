@@ -214,6 +214,11 @@ def main():
         help="Use bfloat16 training",
     )
     parser.add_argument(
+        "--fp16",
+        action="store_true",
+        help="Use float16 training",
+    )
+    parser.add_argument(
         "--wandb_project",
         type=str,
         default="scale-invariant-tokenizer",
@@ -237,6 +242,9 @@ def main():
 
     # Set seed
     set_seed(args.seed)
+
+    # Set W&B project name
+    os.environ["WANDB_PROJECT"] = args.wandb_project
 
     # Determine output directory
     if args.output_dir is None:
@@ -283,8 +291,17 @@ def main():
 
     # Initialize model
     print("Initializing model...")
-    model = AutoModelForCausalLM.from_config(config)
-    print(f"Model initialized with {model.num_parameters():,} parameters")
+    # Always initialize in fp32, let Trainer handle mixed precision via AMP
+    model = AutoModelForCausalLM.from_config(config, torch_dtype=torch.float32)
+    print(f"Model initialized with {model.num_parameters():,} parameters (dtype: {model.dtype})")
+
+    # Log training precision mode
+    if args.fp16:
+        print("Will use FP16 automatic mixed precision training")
+    elif args.bf16:
+        print("Will use BF16 automatic mixed precision training")
+    else:
+        print("Will use FP32 full precision training")
 
     # Prepare dataset
     print("Preparing training dataset...")
@@ -325,7 +342,7 @@ def main():
         "save_steps": args.save_steps,
         "save_total_limit": 3,
         "bf16": args.bf16,
-        "fp16": not args.bf16 and torch.cuda.is_available(),
+        "fp16": args.fp16,
         "dataloader_num_workers": 4,
         "remove_unused_columns": False,
         "report_to": "wandb",
@@ -349,6 +366,7 @@ def main():
         training_args_dict["eval_strategy"] = "no"
 
     training_args = TrainingArguments(**training_args_dict)
+
 
     # Initialize trainer
     trainer = Trainer(

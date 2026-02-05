@@ -165,9 +165,11 @@ def train_model(
         warmup_steps = int(max_steps * config.training.warmup_ratio)
         cmd.extend(["--warmup_steps", str(warmup_steps)])
 
-    # Add bf16 flag
+    # Add precision flags
     if config.training.bf16:
         cmd.append("--bf16")
+    if config.training.fp16:
+        cmd.append("--fp16")
 
     # Run training
     print(f"\n[COMMAND] {' '.join(cmd)}\n")

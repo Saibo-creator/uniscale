@@ -34,8 +34,8 @@ training:
   # Token-based training (NOT epoch-based)
   # max_steps calculated as: (target_tokens) / (batch_size * grad_accum * num_gpus * max_length)
   #
-  # With batch_size=8, grad_accum=4, num_gpus=4, max_length=2048:
-  #   - tokens_per_step = 8 * 4 * 4 * 2048 = 262,144 tokens
+  # With batch_size=4, grad_accum=8, num_gpus=4, max_length=2048:
+  #   - tokens_per_step = 4 * 8 * 4 * 2048 = 262,144 tokens
   #
   # Model size → Target tokens → Max steps (4 GPUs):
   #   50M  → 1B tokens  → 3,815 steps
@@ -43,7 +43,7 @@ training:
   #   300M → 6B tokens  → 22,888 steps
   #   1B   → 20B tokens → 76,294 steps
   #
-  # Note: If using 1 GPU, multiply max_steps by 4
+  # Note: Using batch_size=4 with grad_accum=8 for FP32 memory efficiency
 
   # The training script will automatically set max_steps based on model size
   max_steps_per_model:
@@ -52,10 +52,12 @@ training:
     "300M": 22888   # 6B tokens / 262144 ≈ 22,888 steps (4 GPUs)
     "1B": 76294     # 20B tokens / 262144 ≈ 76,294 steps (4 GPUs)
 
-  # Batch configuration
-  per_device_train_batch_size: 8
-  per_device_eval_batch_size: 16
-  gradient_accumulation_steps: 4  # Effective batch = 8 * 4 = 32
+  # Batch configuration (reduced for FP32 memory constraints)
+  per_device_train_batch_size: 4  # Reduced from 8 to fit in memory
+  per_device_eval_batch_size: 8   # Reduced from 16
+  gradient_accumulation_steps: 8   # Adjusted to maintain effective batch size
+  # Effective batch per GPU: 4 * 8 = 32 (same as before)
+  # Total effective batch (4 GPUs): 32 * 4 = 128
 
   # Optimization
   learning_rate: 5.0e-4
@@ -70,9 +72,9 @@ training:
   max_length: 2048
 
   # Mixed precision training
-  # Note: RTX 2080 Ti (Turing) doesn't support native bf16, use fp16 instead
+  # Using FP32 (full precision) for stability
   bf16: false  # bfloat16 requires Ampere+ (RTX 3000 series or newer)
-  fp16: true   # Use fp16 for RTX 2080 Ti
+  fp16: false  # Use FP32 for maximum stability
 
   # Checkpointing
   save_strategy: "steps"
@@ -98,7 +100,7 @@ output_dir: "out/experiments"
 # Experiment tracking
 wandb:
   enabled: true
-  project: "scale-invariant-tokenizer"
+  project: "uniscale"
   entity: null  # Set to your W&B username/team
   tags:
     - "scaling-law"
