@@ -65,3 +65,6 @@ Thumbs.db
 # Experiment tracking
 experiments/outputs/
 mlruns/
+
+# Personal documentation
+docs/cn/

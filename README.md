@@ -13,7 +13,7 @@ We define "follow the same patterns" as there being a high rank-correlation in t
 ```
 scale-invariant-tokenizer-pick/
 ├── data/                      # Data downloading and preprocessing
-│   ├── download_data.py      # FineWeb 2 subset download script
+│   ├── corpus_downloader.py  # FineWeb 2 data downloader
 │   └── raw/                  # Raw downloaded data
 ├── tokenizers/               # Tokenizer training
 │   ├── train_tokenizer.py   # Tokenizer training script
@@ -86,18 +86,31 @@ The entire experimental pipeline is managed through YAML configuration files. He
 
 ### 1. Download Data
 
-Download training data from FineWeb 2:
+Download training data from FineWeb 2 using the corpus downloader:
 
 ```bash
-python -m uniscale.data.download_data \
+python -m uniscale.data.corpus_downloader \
   --lang_set LANG_SET_20 \
   --total_size_gb 10 \
-  --tokenizer_size_gb 2
+  --tokenizer_size_gb 2 \
+  --output_dir data/raw
+```
+
+This creates per-language text files in:
+- `data/raw/tokenizer_corpus/{lang}/train.txt` - Tokenizer training data (~2GB)
+- `data/raw/main_corpus/{lang}/{train,val,test}.txt` - Main corpus (~10GB)
+
+Then convert to JSONL format:
+
+```bash
+python scripts/convert_corpus_to_jsonl.py
 ```
 
 This will create:
-- `data/raw/train_data.jsonl` - Full training data (~10GB)
-- `data/raw/tokenizer_data.jsonl` - Subset for tokenizer training (~2GB)
+- `data/raw/tokenizer_data.jsonl` - Tokenizer training data
+- `data/raw/train_data.jsonl` - Training data
+- `data/raw/val_data.jsonl` - Validation data
+- `data/raw/test_data.jsonl` - Test data
 
 ### 2. Train Tokenizers
 
@@ -268,7 +281,8 @@ scale-invariant-tokenizer-pick/
 │       ├── __init__.py
 │       ├── data/
 │       │   ├── __init__.py
-│       │   └── download_data.py   # FineWeb 2 download script
+│       │   ├── corpus_downloader.py  # FineWeb 2 data downloader
+│       │   └── __init__.py
 │       ├── tokenizers/
 │       │   ├── __init__.py
 │       │   └── train_tokenizer.py # Core tokenizer training
