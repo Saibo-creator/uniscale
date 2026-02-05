@@ -1,0 +1,27 @@
+# Configuration for training all tokenizers
+
+data_file: "data/raw/tokenizer_data.jsonl"
+
+tokenizers:
+  # BPE tokenizers
+  - algorithm: "bpe"
+    vocab_size: 80000
+    min_frequency: 2
+
+  - algorithm: "bpe"
+    vocab_size: 128000
+    min_frequency: 2
+
+  - algorithm: "bpe"
+    vocab_size: 256000
+    min_frequency: 2
+
+  # UnigramLM tokenizers
+  - algorithm: "unigram"
+    vocab_size: 80000
+
+  - algorithm: "unigram"
+    vocab_size: 128000
+
+  - algorithm: "unigram"
+    vocab_size: 256000

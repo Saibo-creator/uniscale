@@ -1,0 +1,45 @@
+# Configuration for training language models
+
+# Data files
+train_file: "data/raw/train_data.jsonl"
+eval_file: null  # Set to a file path if you have validation data
+
+# Model sizes to train
+model_sizes:
+  - "50M"
+  - "100M"
+  - "300M"
+  - "1B"
+
+# Tokenizers to use (will use all trained tokenizers by default)
+tokenizers:
+  - "out/tokenizers/bpe_v80k"
+  - "out/tokenizers/bpe_v128k"
+  - "out/tokenizers/bpe_v256k"
+  - "out/tokenizers/unigram_v80k"
+  - "out/tokenizers/unigram_v128k"
+  - "out/tokenizers/unigram_v256k"
+
+# Random seeds for multiple runs
+seeds:
+  - 42
+  - 43
+  - 44
+
+# Training hyperparameters
+training:
+  num_train_epochs: 3
+  per_device_train_batch_size: 8
+  gradient_accumulation_steps: 4
+  learning_rate: 5.0e-4
+  warmup_steps: 500
+  max_length: 2048
+  bf16: true  # Use bfloat16 if available
+  save_steps: 1000
+  eval_steps: 1000
+  logging_steps: 100
+
+# Experiment tracking
+wandb:
+  project: "scale-invariant-tokenizer"
+  entity: null  # Set to your W&B entity/username
