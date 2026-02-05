@@ -141,7 +141,8 @@ def train_unigram_tokenizer(
                     out_f.write(text + "\n")
 
     # Train SentencePiece model
-    model_prefix = str(output_path / "sentencepiece")
+    # Use 'tokenizer' as prefix so it creates 'tokenizer.model' (HF compatible name)
+    model_prefix = str(output_path / "tokenizer")
 
     spm.SentencePieceTrainer.train(
         input=str(temp_text_file),
@@ -154,7 +155,7 @@ def train_unigram_tokenizer(
         split_by_unicode_script=False,
         normalization_rule_name="identity",  # No normalization for consistency
         add_dummy_prefix=False,  # No prefix space
-        user_defined_symbols=["<pad>", "<s>", "</s>", "<unk>", "<mask>"],
+        user_defined_symbols=["<mask>"],  # Only custom tokens, control tokens defined via *_id
         pad_id=0,
         bos_id=1,
         eos_id=2,
@@ -164,15 +165,43 @@ def train_unigram_tokenizer(
     # Clean up temp file
     temp_text_file.unlink()
 
-    print(f"✓ Saved UnigramLM tokenizer to {output_path}")
+    print(f"✓ Saved SentencePiece model to {output_path}")
+    print(f"  - tokenizer.model (HF-compatible name)")
+    print(f"  - tokenizer.vocab")
 
-    # Save config
+    # Create HuggingFace-compatible tokenizer_config.json
+    # This allows AutoTokenizer to automatically load the SentencePiece model
+    print("Creating HuggingFace-compatible configuration...")
+
+    tokenizer_config = {
+        "add_bos_token": False,
+        "add_eos_token": False,
+        "bos_token": "<s>",
+        "eos_token": "</s>",
+        "pad_token": "<pad>",
+        "unk_token": "<unk>",
+        "mask_token": "<mask>",
+        "model_max_length": 2048,
+        "padding_side": "right",
+        "truncation_side": "right",
+        "tokenizer_class": "LlamaTokenizer",  # Use Llama tokenizer class for SPM
+        "vocab_size": vocab_size,
+    }
+
+    with open(output_path / "tokenizer_config.json", "w") as f:
+        json.dump(tokenizer_config, f, indent=2)
+
+    # Also save our custom config
     config = {
         "tokenizer_type": "UnigramLM",
         "vocab_size": vocab_size,
+        "backend": "sentencepiece",
     }
     with open(output_path / "config.json", "w") as f:
         json.dump(config, f, indent=2)
+
+    print(f"✓ Created HuggingFace-compatible config")
+    print(f"  Can now load with: AutoTokenizer.from_pretrained('{output_path}')")
 
 
 def main():
