@@ -35,30 +35,13 @@ def load_tokenizer(tokenizer_path: str):
     Returns:
         Loaded tokenizer
     """
-    # Check if it's a SentencePiece model or HF tokenizer
-    tokenizer_dir = Path(tokenizer_path)
+    # All tokenizers should now be loadable via AutoTokenizer
+    # (both BPE with tokenizer.json and Unigram with tokenizer.model + tokenizer_config.json)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
 
-    if (tokenizer_dir / "sentencepiece.model").exists():
-        # SentencePiece/Unigram tokenizer
-        from transformers import LlamaTokenizer
-
-        tokenizer = LlamaTokenizer(
-            vocab_file=str(tokenizer_dir / "sentencepiece.model"),
-            legacy=False,
-        )
-        # Set special tokens
+    # Ensure pad token is set
+    if tokenizer.pad_token is None:
         tokenizer.pad_token = "<pad>"
-        tokenizer.bos_token = "<s>"
-        tokenizer.eos_token = "</s>"
-        tokenizer.unk_token = "<unk>"
-
-    elif (tokenizer_dir / "tokenizer.json").exists():
-        # HF tokenizers (BPE)
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-        tokenizer.pad_token = "<pad>"
-
-    else:
-        raise ValueError(f"No valid tokenizer found in {tokenizer_path}")
 
     return tokenizer
 
@@ -67,7 +50,7 @@ def prepare_dataset(
     data_file: str,
     tokenizer,
     max_length: int = 2048,
-    num_proc: int = 4,
+    num_proc: Optional[int] = None,
 ):
     """
     Prepare dataset for training.
@@ -76,11 +59,17 @@ def prepare_dataset(
         data_file: Path to training data (JSONL)
         tokenizer: Tokenizer to use
         max_length: Maximum sequence length
-        num_proc: Number of processes for preprocessing
+        num_proc: Number of processes for preprocessing (None = auto-detect 80% of cores)
 
     Returns:
         Tokenized dataset
     """
+    # Auto-detect number of processes if not specified
+    if num_proc is None:
+        import multiprocessing as mp
+        num_proc = max(1, int(mp.cpu_count() * 0.8))
+        print(f"Auto-detected {num_proc} CPU cores for tokenization (80% of {mp.cpu_count()})")
+
     # Load dataset
     dataset = load_dataset("json", data_files=data_file, split="train")
 
@@ -145,6 +134,12 @@ def main():
         default=2048,
         help="Maximum sequence length",
     )
+    parser.add_argument(
+        "--num_proc",
+        type=int,
+        default=None,
+        help="Number of CPU processes for tokenization (default: auto-detect 80%% of cores)",
+    )
 
     # Training arguments
     parser.add_argument(
@@ -156,8 +151,14 @@ def main():
     parser.add_argument(
         "--num_train_epochs",
         type=int,
-        default=3,
-        help="Number of training epochs",
+        default=None,
+        help="Number of training epochs (use this OR max_steps, not both)",
+    )
+    parser.add_argument(
+        "--max_steps",
+        type=int,
+        default=None,
+        help="Maximum number of training steps (for scaling law training)",
     )
     parser.add_argument(
         "--per_device_train_batch_size",
@@ -227,6 +228,13 @@ def main():
 
     args = parser.parse_args()
 
+    # Validate training config
+    if args.num_train_epochs is None and args.max_steps is None:
+        # Default to 3 epochs if neither specified
+        args.num_train_epochs = 3
+    elif args.num_train_epochs is not None and args.max_steps is not None:
+        raise ValueError("Specify either num_train_epochs OR max_steps, not both")
+
     # Set seed
     set_seed(args.seed)
 
@@ -240,11 +248,26 @@ def main():
         tokenizer_name = Path(args.tokenizer_path).name
         args.run_name = f"{args.model_size}_{tokenizer_name}_seed{args.seed}"
 
+    # Calculate total tokens if using max_steps
+    total_tokens = None
+    if args.max_steps is not None:
+        tokens_per_step = (
+            args.per_device_train_batch_size
+            * args.gradient_accumulation_steps
+            * args.max_length
+        )
+        total_tokens = args.max_steps * tokens_per_step
+
     print(f"\n{'='*60}")
     print(f"Training {args.model_size} model")
     print(f"Tokenizer: {args.tokenizer_path}")
     print(f"Output: {args.output_dir}")
     print(f"Seed: {args.seed}")
+    if args.max_steps:
+        print(f"Max steps: {args.max_steps:,}")
+        print(f"Total tokens: {total_tokens:,} ({total_tokens/1e9:.2f}B)")
+    else:
+        print(f"Epochs: {args.num_train_epochs}")
     print(f"{'='*60}\n")
 
     # Load tokenizer
@@ -269,6 +292,7 @@ def main():
         args.train_file,
         tokenizer,
         max_length=args.max_length,
+        num_proc=args.num_proc,
     )
     print(f"Training dataset: {len(train_dataset)} examples")
 
@@ -279,6 +303,7 @@ def main():
             args.eval_file,
             tokenizer,
             max_length=args.max_length,
+            num_proc=args.num_proc,
         )
         print(f"Evaluation dataset: {len(eval_dataset)} examples")
 
@@ -289,30 +314,41 @@ def main():
     )
 
     # Training arguments
-    training_args = TrainingArguments(
-        output_dir=args.output_dir,
-        overwrite_output_dir=True,
-        num_train_epochs=args.num_train_epochs,
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        per_device_eval_batch_size=args.per_device_train_batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        learning_rate=args.learning_rate,
-        warmup_steps=args.warmup_steps,
-        logging_steps=args.logging_steps,
-        save_steps=args.save_steps,
-        eval_steps=args.eval_steps if eval_dataset else None,
-        evaluation_strategy="steps" if eval_dataset else "no",
-        save_total_limit=3,
-        load_best_model_at_end=True if eval_dataset else False,
-        metric_for_best_model="eval_loss" if eval_dataset else None,
-        bf16=args.bf16,
-        fp16=not args.bf16 and torch.cuda.is_available(),
-        dataloader_num_workers=4,
-        remove_unused_columns=False,
-        report_to="wandb",
-        run_name=args.run_name,
-        seed=args.seed,
-    )
+    training_args_dict = {
+        "output_dir": args.output_dir,
+        "per_device_train_batch_size": args.per_device_train_batch_size,
+        "per_device_eval_batch_size": args.per_device_train_batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "learning_rate": args.learning_rate,
+        "warmup_steps": args.warmup_steps,
+        "logging_steps": args.logging_steps,
+        "save_steps": args.save_steps,
+        "save_total_limit": 3,
+        "bf16": args.bf16,
+        "fp16": not args.bf16 and torch.cuda.is_available(),
+        "dataloader_num_workers": 4,
+        "remove_unused_columns": False,
+        "report_to": "wandb",
+        "run_name": args.run_name,
+        "seed": args.seed,
+    }
+
+    # Add either max_steps or num_train_epochs
+    if args.max_steps is not None:
+        training_args_dict["max_steps"] = args.max_steps
+    else:
+        training_args_dict["num_train_epochs"] = args.num_train_epochs
+
+    # Add evaluation settings if eval dataset exists
+    if eval_dataset:
+        training_args_dict["eval_steps"] = args.eval_steps
+        training_args_dict["eval_strategy"] = "steps"
+        training_args_dict["load_best_model_at_end"] = True
+        training_args_dict["metric_for_best_model"] = "eval_loss"
+    else:
+        training_args_dict["eval_strategy"] = "no"
+
+    training_args = TrainingArguments(**training_args_dict)
 
     # Initialize trainer
     trainer = Trainer(
@@ -321,7 +357,6 @@ def main():
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=data_collator,
-        tokenizer=tokenizer,
     )
 
     # Train
@@ -344,7 +379,9 @@ def main():
         "num_parameters": model.num_parameters(),
         "seed": args.seed,
         "max_length": args.max_length,
-        "num_train_epochs": args.num_train_epochs,
+        "num_train_epochs": args.num_train_epochs if args.max_steps is None else None,
+        "max_steps": args.max_steps if args.max_steps is not None else None,
+        "total_tokens": total_tokens if total_tokens is not None else None,
         "learning_rate": args.learning_rate,
     }
 

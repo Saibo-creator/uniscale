@@ -1,0 +1,158 @@
+# Configuration for training language models with Scaling Law
+# Following Chinchilla scaling: 20 tokens per parameter
+
+# Data files (FineWeb 2 - LANG_SET_20)
+train_file: "data/raw/train_data.jsonl"  # 5.7GB FineWeb corpus
+eval_file: "data/raw/val_data.jsonl"     # 29MB validation set
+
+# Model sizes to train
+# Start with smaller models for faster experimentation
+model_sizes:
+  - "50M"   # 50M params → 1B tokens
+  - "100M"  # 100M params → 2B tokens
+  # - "300M"  # 300M params → 6B tokens (uncomment when ready)
+  # - "1B"    # 1B params → 20B tokens (uncomment when ready)
+
+# Tokenizers to use - start with 2 for comparison
+tokenizers:
+  - "out/tokenizers/bpe_v80k"
+  - "out/tokenizers/unigram_v80k"
+  # Add more when scaling up:
+  # - "out/tokenizers/bpe_v128k"
+  # - "out/tokenizers/unigram_v128k"
+  # - "out/tokenizers/bpe_v256k"
+  # - "out/tokenizers/unigram_v256k"
+
+# Random seeds for multiple runs (3 seeds for statistical significance)
+seeds:
+  - 42
+  - 43
+  - 44
+
+# Training hyperparameters
+training:
+  # Token-based training (NOT epoch-based)
+  # max_steps calculated as: (target_tokens) / (batch_size * grad_accum * num_gpus * max_length)
+  #
+  # With batch_size=8, grad_accum=4, num_gpus=4, max_length=2048:
+  #   - tokens_per_step = 8 * 4 * 4 * 2048 = 262,144 tokens
+  #
+  # Model size → Target tokens → Max steps (4 GPUs):
+  #   50M  → 1B tokens  → 3,815 steps
+  #   100M → 2B tokens  → 7,629 steps
+  #   300M → 6B tokens  → 22,888 steps
+  #   1B   → 20B tokens → 76,294 steps
+  #
+  # Note: If using 1 GPU, multiply max_steps by 4
+
+  # The training script will automatically set max_steps based on model size
+  max_steps_per_model:
+    "50M": 3815     # 1B tokens / 262144 ≈ 3,815 steps (4 GPUs)
+    "100M": 7629    # 2B tokens / 262144 ≈ 7,629 steps (4 GPUs)
+    "300M": 22888   # 6B tokens / 262144 ≈ 22,888 steps (4 GPUs)
+    "1B": 76294     # 20B tokens / 262144 ≈ 76,294 steps (4 GPUs)
+
+  # Batch configuration
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 16
+  gradient_accumulation_steps: 4  # Effective batch = 8 * 4 = 32
+
+  # Optimization
+  learning_rate: 5.0e-4
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+
+  # Learning rate schedule
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.01  # 1% of training for warmup
+
+  # Sequence length
+  max_length: 2048
+
+  # Mixed precision training
+  # Note: RTX 2080 Ti (Turing) doesn't support native bf16, use fp16 instead
+  bf16: false  # bfloat16 requires Ampere+ (RTX 3000 series or newer)
+  fp16: true   # Use fp16 for RTX 2080 Ti
+
+  # Checkpointing
+  save_strategy: "steps"
+  save_steps: 5000  # Save every 5k steps
+  save_total_limit: 3  # Keep only last 3 checkpoints to save space
+
+  # Evaluation
+  evaluation_strategy: "steps"
+  eval_steps: 2500  # Eval every 2.5k steps
+
+  # Logging
+  logging_steps: 100
+  logging_first_step: true
+
+  # Performance
+  dataloader_num_workers: 4
+  remove_unused_columns: false
+
+# Output directory structure
+# out/experiments/{model_size}_{tokenizer_name}_seed{seed}/
+output_dir: "out/experiments"
+
+# Experiment tracking
+wandb:
+  enabled: true
+  project: "scale-invariant-tokenizer"
+  entity: null  # Set to your W&B username/team
+  tags:
+    - "scaling-law"
+    - "fineweb2"
+    - "20-tokens-per-param"
+
+# Hardware configuration
+# Adjust based on your GPU memory
+hardware:
+  # For 50M model: ~2GB GPU memory
+  # For 100M model: ~4GB GPU memory
+  # For 300M model: ~12GB GPU memory
+  # For 1B model: ~40GB GPU memory (may need gradient checkpointing)
+  gradient_checkpointing: false  # Enable for larger models if OOM
+  use_cpu: false
+
+# Model architecture (Apertus-based)
+model:
+  # Based on swiss-ai/Apertus-8B-2509
+  # We scale down to our target sizes
+  hidden_act: "silu"
+  initializer_range: 0.02
+  max_position_embeddings: 2048
+  rope_theta: 10000.0
+  rms_norm_eps: 1e-05
+  tie_word_embeddings: false
+  use_cache: true
+
+  # Size-specific configs (automatically selected based on model_size)
+  size_configs:
+    "50M":
+      hidden_size: 512
+      intermediate_size: 1376  # 2.688 * hidden_size
+      num_hidden_layers: 16
+      num_attention_heads: 8
+      num_key_value_heads: 2  # GQA with ratio 4:1
+
+    "100M":
+      hidden_size: 768
+      intermediate_size: 2048  # ~2.67 * hidden_size
+      num_hidden_layers: 12
+      num_attention_heads: 12
+      num_key_value_heads: 3  # GQA with ratio 4:1
+
+    "300M":
+      hidden_size: 1024
+      intermediate_size: 2752  # 2.688 * hidden_size
+      num_hidden_layers: 24
+      num_attention_heads: 16
+      num_key_value_heads: 4  # GQA with ratio 4:1
+
+    "1B":
+      hidden_size: 2048
+      intermediate_size: 5504  # 2.688 * hidden_size
+      num_hidden_layers: 24
+      num_attention_heads: 32
+      num_key_value_heads: 8  # GQA with ratio 4:1

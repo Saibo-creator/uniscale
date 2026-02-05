@@ -1,13 +1,15 @@
 """
 Train all language models based on YAML configuration.
+
+Supports both epoch-based and scaling-law (max_steps) training.
 """
 
 import argparse
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import yaml
 
@@ -16,24 +18,41 @@ import yaml
 class TrainingHyperparameters:
     """Training hyperparameters."""
 
-    num_train_epochs: int = 3
+    # Either num_train_epochs OR max_steps (via max_steps_per_model)
+    num_train_epochs: Optional[int] = None
+    max_steps_per_model: Optional[Dict[str, int]] = None
+
     per_device_train_batch_size: int = 8
+    per_device_eval_batch_size: int = 16
     gradient_accumulation_steps: int = 4
     learning_rate: float = 5e-4
-    warmup_steps: int = 500
+    warmup_steps: Optional[int] = None
+    warmup_ratio: Optional[float] = None
     max_length: int = 2048
     bf16: bool = True
+    fp16: bool = False
     save_steps: int = 1000
+    save_strategy: str = "steps"
+    save_total_limit: int = 3
     eval_steps: int = 1000
+    evaluation_strategy: str = "steps"
     logging_steps: int = 100
+    logging_first_step: bool = True
+    weight_decay: float = 0.1
+    max_grad_norm: float = 1.0
+    lr_scheduler_type: str = "cosine"
+    dataloader_num_workers: int = 4
+    remove_unused_columns: bool = False
 
 
 @dataclass
 class WandBConfig:
     """Weights & Biases configuration."""
 
+    enabled: bool = True
     project: str = "scale-invariant-tokenizer"
     entity: Optional[str] = None
+    tags: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -86,58 +105,81 @@ def train_model(
     Returns:
         True if successful, False otherwise
     """
-    # Build command
+    # Calculate max_steps if using scaling law training
+    max_steps = None
+    total_tokens = None
+
+    if config.training.max_steps_per_model:
+        if model_size in config.training.max_steps_per_model:
+            max_steps = config.training.max_steps_per_model[model_size]
+
+            # Calculate total tokens (account for multi-GPU)
+            import torch
+            num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+
+            tokens_per_step = (
+                config.training.per_device_train_batch_size
+                * config.training.gradient_accumulation_steps
+                * config.training.max_length
+                * num_gpus
+            )
+            total_tokens = max_steps * tokens_per_step
+
+            print(f"  Training with {max_steps:,} steps × {num_gpus} GPUs = {total_tokens:,} tokens ({total_tokens/1e9:.2f}B)")
+
+    # Build command - use correct module path
     cmd = [
-        "python",
-        "-m",
-        "scale.models.train_lm",
-        "--model_size",
-        model_size,
-        "--tokenizer_path",
-        tokenizer_path,
-        "--train_file",
-        config.train_file,
-        "--seed",
-        str(seed),
-        "--num_train_epochs",
-        str(config.training.num_train_epochs),
-        "--per_device_train_batch_size",
-        str(config.training.per_device_train_batch_size),
-        "--gradient_accumulation_steps",
-        str(config.training.gradient_accumulation_steps),
-        "--learning_rate",
-        str(config.training.learning_rate),
-        "--warmup_steps",
-        str(config.training.warmup_steps),
-        "--max_length",
-        str(config.training.max_length),
-        "--save_steps",
-        str(config.training.save_steps),
-        "--eval_steps",
-        str(config.training.eval_steps),
-        "--logging_steps",
-        str(config.training.logging_steps),
-        "--wandb_project",
-        config.wandb.project,
+        sys.executable,  # Use current Python interpreter
+        "src/uniscale/models/train_lm.py",  # Fixed path
+        "--model_size", model_size,
+        "--tokenizer_path", tokenizer_path,
+        "--train_file", config.train_file,
+        "--seed", str(seed),
+        "--per_device_train_batch_size", str(config.training.per_device_train_batch_size),
+        "--gradient_accumulation_steps", str(config.training.gradient_accumulation_steps),
+        "--learning_rate", str(config.training.learning_rate),
+        "--max_length", str(config.training.max_length),
+        "--save_steps", str(config.training.save_steps),
+        "--logging_steps", str(config.training.logging_steps),
+        "--wandb_project", config.wandb.project,
     ]
 
+    # Add either num_train_epochs OR max_steps (not both)
+    if max_steps is not None:
+        cmd.extend(["--max_steps", str(max_steps)])
+    elif config.training.num_train_epochs is not None:
+        cmd.extend(["--num_train_epochs", str(config.training.num_train_epochs)])
+    else:
+        raise ValueError("Must specify either num_train_epochs or max_steps_per_model in config")
+
+    # Add eval file if specified
     if config.eval_file:
         cmd.extend(["--eval_file", config.eval_file])
+        cmd.extend(["--eval_steps", str(config.training.eval_steps)])
 
+    # Add warmup configuration
+    if config.training.warmup_steps is not None:
+        cmd.extend(["--warmup_steps", str(config.training.warmup_steps)])
+    elif config.training.warmup_ratio is not None and max_steps is not None:
+        # Calculate warmup steps from ratio
+        warmup_steps = int(max_steps * config.training.warmup_ratio)
+        cmd.extend(["--warmup_steps", str(warmup_steps)])
+
+    # Add bf16 flag
     if config.training.bf16:
         cmd.append("--bf16")
 
-    if config.wandb.entity:
-        cmd.extend(["--wandb_entity", config.wandb.entity])
-
     # Run training
-    print(f"\nRunning: {' '.join(cmd)}\n")
+    print(f"\n[COMMAND] {' '.join(cmd)}\n")
 
     try:
         result = subprocess.run(cmd, check=True)
         return result.returncode == 0
     except subprocess.CalledProcessError as e:
-        print(f"Error training model: {e}")
+        print(f"✗ Training failed with exit code {e.returncode}")
+        return False
+    except KeyboardInterrupt:
+        print(f"\n✗ Training interrupted by user")
         return False
 
 
@@ -188,17 +230,49 @@ def main():
     # Calculate total number of training runs
     total_runs = len(model_sizes) * len(tokenizers) * len(seeds)
 
-    print(f"\n{'='*60}")
+    # Determine training mode
+    using_scaling_law = config.training.max_steps_per_model is not None
+
+    print(f"\n{'='*70}")
     print("Training Configuration")
-    print(f"{'='*60}")
+    print(f"{'='*70}")
+    print(f"Config file: {args.config}")
+    print(f"Training mode: {'Scaling Law (max_steps)' if using_scaling_law else 'Epoch-based'}")
     print(f"Model sizes: {model_sizes}")
-    print(f"Tokenizers: {len(tokenizers)}")
-    print(f"Seeds: {seeds}")
+
+    if using_scaling_law and config.training.max_steps_per_model:
+        # Detect number of GPUs
+        import torch
+        num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+
+        print(f"\nScaling law targets (20 tokens/param) - Using {num_gpus} GPU(s):")
+        for size in model_sizes:
+            if size in config.training.max_steps_per_model:
+                steps = config.training.max_steps_per_model[size]
+                tokens_per_step = (
+                    config.training.per_device_train_batch_size
+                    * config.training.gradient_accumulation_steps
+                    * config.training.max_length
+                    * num_gpus  # Account for multi-GPU training
+                )
+                total_tokens = steps * tokens_per_step
+                print(f"  {size:>5s}: {steps:>7,} steps × {num_gpus} GPUs = {total_tokens/1e9:>5.2f}B tokens")
+
+    print(f"\nTokenizers ({len(tokenizers)}):")
+    for tok in tokenizers:
+        print(f"  - {Path(tok).name}")
+
+    print(f"\nSeeds: {seeds}")
     print(f"Total training runs: {total_runs}")
-    print(f"{'='*60}\n")
+    print(f"{'='*70}\n")
 
     if args.dry_run:
-        print("DRY RUN - Commands will not be executed\n")
+        print("[DRY RUN MODE] - Commands will not be executed\n")
+    else:
+        response = input(f"Start {total_runs} training run(s)? [y/N] ")
+        if response.lower() not in ["y", "yes"]:
+            print("Aborted.")
+            return
 
     # Train all combinations
     successful = 0

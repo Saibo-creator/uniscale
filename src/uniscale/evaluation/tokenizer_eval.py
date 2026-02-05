@@ -41,7 +41,7 @@ def discover_trained_tokenizers(tokenizers_dir: str = "out/tokenizers") -> Dict[
 
         # All tokenizers are now HF-compatible
         # BPE has tokenizer.json, Unigram has tokenizer.model + tokenizer_config.json
-        if (tok_dir / "tokenizer.json").exists() or (tok_dir / "tokenizer_config.json").exists():
+        if (tok_dir / "tokenizer.json").exists() or (tok_dir / "config.json").exists():
             tokenizer_config[tok_name] = {
                 "class": "huggingface",
                 "path": str(tok_dir.absolute())
