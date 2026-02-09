@@ -129,7 +129,36 @@ This will train:
 
 Output: `tokenizers/trained/{algorithm}_v{size}k/`
 
-### 3. Train Language Models
+### 3. Evaluate Tokenizers (Intrinsic Metrics)
+
+Evaluate trained tokenizers with comprehensive intrinsic metrics:
+
+```bash
+python scripts/evaluate_tokenizers.py \
+  --tokenizers_dir out/tokenizers \
+  --eval_data_file data/raw/test_data.jsonl \
+  --output_dir out/tokenizer_eval
+```
+
+This will compute:
+- **Compression Rate**: Text encoding efficiency (bytes/chars per token)
+- **Fertility**: Tokens per word/character (granularity measure)
+- **Vocabulary Utilization**: Fraction of vocabulary actually used
+- **Multilingual Fairness (Gini)**: Cross-language equity (0=perfect fairness, 1=max unfairness)
+- **Entropy**: Information-theoretic token distribution analysis
+
+**Key Outputs**:
+- `out/tokenizer_eval/analysis_results.json` - Comprehensive metrics
+- `out/tokenizer_eval/*.png` - Comparison plots
+- `out/tokenizer_eval/latex_tables/` - Publication-ready tables
+
+**Understanding Results**:
+- **Lower fertility**: More efficient tokenization
+- **Higher compression rate**: Better text compression
+- **Lower Gini**: Fairer treatment across languages
+- **Higher vocab utilization**: Less wasted vocabulary space
+
+### 4. Train Language Models
 
 Train all model size and tokenizer combinations:
 
@@ -164,7 +193,7 @@ python scripts/train_all_models.py --dry_run
 
 Output: `models/checkpoints/{model_size}_{tokenizer}_{seed}/`
 
-### 4. Evaluate Models
+### 5. Evaluate Models
 
 Evaluate all trained models on test data:
 
@@ -187,7 +216,7 @@ python scripts/evaluate_all_models.py \
 
 Output: `evaluation/results/{model_name}_results.json`
 
-### 5. Analyze Rank Correlation
+### 6. Analyze Rank Correlation
 
 Compute rank correlation between small and large model performance:
 
