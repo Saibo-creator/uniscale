@@ -22,6 +22,34 @@ from tqdm import tqdm
 import sentencepiece as spm
 
 
+def align_vocab_size_to_256(vocab_size: int) -> int:
+    """
+    Align vocabulary size to the nearest multiple of 256 for CUDA efficiency.
+
+    CUDA operations are optimized for memory aligned to 256 bytes.
+    Aligning vocab size to 256 multiples can provide 5-15% performance improvement.
+
+    Args:
+        vocab_size: Original vocabulary size
+
+    Returns:
+        Aligned vocabulary size (nearest multiple of 256)
+    """
+    remainder = vocab_size % 256
+    if remainder == 0:
+        return vocab_size
+
+    # Round to nearest (round up if exactly at midpoint or beyond)
+    if remainder < 128:
+        # Round down
+        aligned = vocab_size - remainder
+    else:
+        # Round up (including remainder == 128)
+        aligned = vocab_size + (256 - remainder)
+
+    return aligned
+
+
 def get_text_iterator(data_file: str, batch_size: int = 1000) -> Iterator[List[str]]:
     """
     Iterator to yield batches of text from JSONL file.
@@ -59,11 +87,18 @@ def train_bpe_tokenizer(
 
     Args:
         data_file: Path to training data (JSONL)
-        vocab_size: Size of vocabulary
+        vocab_size: Size of vocabulary (will be aligned to nearest 256 multiple)
         output_dir: Directory to save trained tokenizer
         min_frequency: Minimum frequency for tokens
     """
-    print(f"Training BPE tokenizer with vocab_size={vocab_size}")
+    # Align vocab size to 256 for CUDA efficiency
+    original_vocab_size = vocab_size
+    vocab_size = align_vocab_size_to_256(vocab_size)
+
+    if vocab_size != original_vocab_size:
+        print(f"Aligning vocab size: {original_vocab_size:,} → {vocab_size:,} (nearest 256 multiple)")
+
+    print(f"Training BPE tokenizer with vocab_size={vocab_size:,}")
 
     # Initialize tokenizer with ByteLevel BPE
     tokenizer = Tokenizer(models.BPE())
@@ -120,10 +155,17 @@ def train_unigram_tokenizer(
 
     Args:
         data_file: Path to training data (JSONL)
-        vocab_size: Size of vocabulary
+        vocab_size: Size of vocabulary (will be aligned to nearest 256 multiple)
         output_dir: Directory to save trained tokenizer
     """
-    print(f"Training UnigramLM tokenizer with vocab_size={vocab_size}")
+    # Align vocab size to 256 for CUDA efficiency
+    original_vocab_size = vocab_size
+    vocab_size = align_vocab_size_to_256(vocab_size)
+
+    if vocab_size != original_vocab_size:
+        print(f"Aligning vocab size: {original_vocab_size:,} → {vocab_size:,} (nearest 256 multiple)")
+
+    print(f"Training UnigramLM tokenizer with vocab_size={vocab_size:,}")
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)

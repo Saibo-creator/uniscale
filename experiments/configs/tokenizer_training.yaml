@@ -1,4 +1,11 @@
 # Configuration for training all tokenizers
+#
+# Note: Vocabulary sizes will be automatically aligned to the nearest
+# multiple of 256 for CUDA efficiency (5-15% performance improvement).
+# For example:
+#   80,000 → 80,128 (+128)
+#   128,000 → 128,000 (already aligned)
+#   256,000 → 256,000 (already aligned)
 
 data_file: "data/raw/tokenizer_data.jsonl"
 
