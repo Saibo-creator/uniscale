@@ -240,11 +240,22 @@ def main():
     elif args.num_train_epochs is not None and args.max_steps is not None:
         raise ValueError("Specify either num_train_epochs OR max_steps, not both")
 
+    # Get local rank for DDP (rank 0 is the main process)
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    is_main_process = local_rank == 0
+
+    # Debug: Always print this to see if script is running
+    print(f"[DEBUG] LOCAL_RANK={os.environ.get('LOCAL_RANK', 'NOT_SET')}, local_rank={local_rank}, is_main_process={is_main_process}", flush=True)
+
     # Set seed
     set_seed(args.seed)
 
-    # Set W&B project name
+    # Set W&B project name and configure for DDP
     os.environ["WANDB_PROJECT"] = args.wandb_project
+
+    # Only report to wandb from main process in DDP
+    if not is_main_process:
+        os.environ["WANDB_DISABLED"] = "true"
 
     # Determine output directory
     if args.output_dir is None:
@@ -266,63 +277,97 @@ def main():
         )
         total_tokens = args.max_steps * tokens_per_step
 
-    print(f"\n{'='*60}")
-    print(f"Training {args.model_size} model")
-    print(f"Tokenizer: {args.tokenizer_path}")
-    print(f"Output: {args.output_dir}")
-    print(f"Seed: {args.seed}")
-    if args.max_steps:
-        print(f"Max steps: {args.max_steps:,}")
-        print(f"Total tokens: {total_tokens:,} ({total_tokens/1e9:.2f}B)")
-    else:
-        print(f"Epochs: {args.num_train_epochs}")
-    print(f"{'='*60}\n")
+    if is_main_process:
+        print(f"\n{'='*60}")
+        print(f"Training {args.model_size} model")
+        print(f"Tokenizer: {args.tokenizer_path}")
+        print(f"Output: {args.output_dir}")
+        print(f"Seed: {args.seed}")
+        if args.max_steps:
+            print(f"Max steps: {args.max_steps:,}")
+            print(f"Total tokens: {total_tokens:,} ({total_tokens/1e9:.2f}B)")
+        else:
+            print(f"Epochs: {args.num_train_epochs}")
+        print(f"{'='*60}\n")
 
     # Load tokenizer
-    print("Loading tokenizer...")
+    if is_main_process:
+        print("Loading tokenizer...", flush=True)
     tokenizer = load_tokenizer(args.tokenizer_path)
-    print(f"Tokenizer loaded. Vocab size: {len(tokenizer)}")
+    if is_main_process:
+        print(f"Tokenizer loaded. Vocab size: {len(tokenizer)}", flush=True)
 
     # Get model config
-    print(f"Creating {args.model_size} model config...")
+    if is_main_process:
+        print(f"Creating {args.model_size} model config...", flush=True)
+        print(f"[DEBUG] About to load Apertus config from HuggingFace Hub...", flush=True)
     config = get_apertus_config(args.model_size, vocab_size=len(tokenizer))
+    if is_main_process:
+        print(f"[DEBUG] Apertus config loaded successfully", flush=True)
     estimated_params = estimate_parameters(config)
-    print(f"Estimated parameters: {estimated_params:,} (~{estimated_params/1e6:.1f}M)")
+    if is_main_process:
+        print(f"Estimated parameters: {estimated_params:,} (~{estimated_params/1e6:.1f}M)")
 
     # Initialize model
-    print("Initializing model...")
+    if is_main_process:
+        print("Initializing model...")
     # Always initialize in fp32, let Trainer handle mixed precision via AMP
     model = AutoModelForCausalLM.from_config(config, torch_dtype=torch.float32)
-    print(f"Model initialized with {model.num_parameters():,} parameters (dtype: {model.dtype})")
+    if is_main_process:
+        print(f"Model initialized with {model.num_parameters():,} parameters (dtype: {model.dtype})")
 
-    # Log training precision mode
-    if args.fp16:
-        print("Will use FP16 automatic mixed precision training")
-    elif args.bf16:
-        print("Will use BF16 automatic mixed precision training")
-    else:
-        print("Will use FP32 full precision training")
+        # Log training precision mode
+        if args.fp16:
+            print("Will use FP16 automatic mixed precision training")
+        elif args.bf16:
+            print("Will use BF16 automatic mixed precision training")
+        else:
+            print("Will use FP32 full precision training")
 
-    # Prepare dataset
-    print("Preparing training dataset...")
-    train_dataset = prepare_dataset(
-        args.train_file,
-        tokenizer,
-        max_length=args.max_length,
-        num_proc=args.num_proc,
-    )
-    print(f"Training dataset: {len(train_dataset)} examples")
-
-    eval_dataset = None
-    if args.eval_file:
-        print("Preparing evaluation dataset...")
-        eval_dataset = prepare_dataset(
-            args.eval_file,
+    # Prepare dataset - ONLY on main process to avoid conflicts
+    # Other processes will load from cache
+    if is_main_process:
+        print("Preparing training dataset...")
+        train_dataset = prepare_dataset(
+            args.train_file,
             tokenizer,
             max_length=args.max_length,
             num_proc=args.num_proc,
         )
-        print(f"Evaluation dataset: {len(eval_dataset)} examples")
+        print(f"Training dataset: {len(train_dataset)} examples")
+
+        eval_dataset = None
+        if args.eval_file:
+            print("Preparing evaluation dataset...")
+            eval_dataset = prepare_dataset(
+                args.eval_file,
+                tokenizer,
+                max_length=args.max_length,
+                num_proc=args.num_proc,
+            )
+            print(f"Evaluation dataset: {len(eval_dataset)} examples")
+
+    # Wait for main process to finish preparing datasets
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.barrier()
+
+    # Non-main processes load the cached datasets
+    if not is_main_process:
+        train_dataset = prepare_dataset(
+            args.train_file,
+            tokenizer,
+            max_length=args.max_length,
+            num_proc=1,  # Use single process to load from cache
+        )
+
+        eval_dataset = None
+        if args.eval_file:
+            eval_dataset = prepare_dataset(
+                args.eval_file,
+                tokenizer,
+                max_length=args.max_length,
+                num_proc=1,
+            )
 
     # Data collator
     data_collator = DataCollatorForLanguageModeling(
@@ -378,36 +423,38 @@ def main():
     )
 
     # Train
-    print("\n" + "="*60)
-    print("Starting training...")
-    print("="*60 + "\n")
+    if is_main_process:
+        print("\n" + "="*60)
+        print("Starting training...")
+        print("="*60 + "\n")
 
     trainer.train()
 
-    # Save final model
-    print(f"\nSaving final model to {args.output_dir}")
-    trainer.save_model(args.output_dir)
-    tokenizer.save_pretrained(args.output_dir)
+    # Save final model (only main process saves)
+    if is_main_process:
+        print(f"\nSaving final model to {args.output_dir}")
+        trainer.save_model(args.output_dir)
+        tokenizer.save_pretrained(args.output_dir)
 
-    # Save training info
-    info = {
-        "model_size": args.model_size,
-        "tokenizer_path": args.tokenizer_path,
-        "vocab_size": len(tokenizer),
-        "num_parameters": model.num_parameters(),
-        "seed": args.seed,
-        "max_length": args.max_length,
-        "num_train_epochs": args.num_train_epochs if args.max_steps is None else None,
-        "max_steps": args.max_steps if args.max_steps is not None else None,
-        "total_tokens": total_tokens if total_tokens is not None else None,
-        "learning_rate": args.learning_rate,
-    }
+        # Save training info
+        info = {
+            "model_size": args.model_size,
+            "tokenizer_path": args.tokenizer_path,
+            "vocab_size": len(tokenizer),
+            "num_parameters": model.num_parameters(),
+            "seed": args.seed,
+            "max_length": args.max_length,
+            "num_train_epochs": args.num_train_epochs if args.max_steps is None else None,
+            "max_steps": args.max_steps if args.max_steps is not None else None,
+            "total_tokens": total_tokens if total_tokens is not None else None,
+            "learning_rate": args.learning_rate,
+        }
 
-    with open(Path(args.output_dir) / "training_info.json", "w") as f:
-        json.dump(info, f, indent=2)
+        with open(Path(args.output_dir) / "training_info.json", "w") as f:
+            json.dump(info, f, indent=2)
 
-    print(f"\n✓ Training completed!")
-    print(f"Model saved to: {args.output_dir}")
+        print(f"\n✓ Training completed!")
+        print(f"Model saved to: {args.output_dir}")
 
 
 if __name__ == "__main__":

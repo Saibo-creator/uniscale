@@ -1,12 +1,12 @@
 from transformers import AutoTokenizer
 
-# 加载BPE（已经是HF格式）
+# Load BPE (already in HF format)
 bpe_tokenizer = AutoTokenizer.from_pretrained("out/tokenizers/bpe_v80k")
 
-# 加载UnigramLM（现在也能用AutoTokenizer！）
+# Load UnigramLM (now also compatible with AutoTokenizer!)
 unigram_tokenizer = AutoTokenizer.from_pretrained("out/tokenizers/unigram_v80k")
 
-# 统一的接口
+# Unified interface
 text = "Hello world!"
 bpe_tokens = bpe_tokenizer.tokenize(text)
 print(f"BPE {bpe_tokens}")

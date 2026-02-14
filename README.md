@@ -58,18 +58,22 @@ scale-invariant-tokenizer-pick/
 
 ## Installation
 
+### Docker Environment (Recommended)
+
+For a consistent development environment with GPU support, we recommend using:
+
+```bash
+docker pull nvcr.io/nvidia/pytorch:24.04-py3
+```
+
+This NVIDIA PyTorch container includes CUDA, cuDNN, and other essential dependencies pre-configured.
+
+### Package Installation
+
 This project is organized as a Python package called `uniscale`. Install it in editable mode:
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/scale-invariant-tokenizer-pick.git
-cd scale-invariant-tokenizer-pick
-
-# Install the package in editable mode
-pip install -e .
-
-# Or install with development tools
-pip install -e ".[dev]"
+pip install git+https://github.com/Saibo-creator/uniscale.git
 ```
 
 After installation, you can import the package anywhere:
@@ -90,7 +94,8 @@ Download training data from FineWeb 2 using the corpus downloader:
 
 ```bash
 python -m uniscale.data.corpus_downloader \
-  --lang_set LANG_SET_20 \
+  --dataset fineweb \
+  --lang_set L20 \
   --total_size_gb 10 \
   --tokenizer_size_gb 2 \
   --output_dir data/raw
@@ -175,6 +180,26 @@ This will train models for:
 - 3 random seeds each
 - Total: 72 training runs (4 sizes × 6 tokenizers × 3 seeds)
 
+**Training with multiple GPUs (DDP):**
+
+```bash
+# Single GPU (default)
+python scripts/train_all_models.py \
+  --config experiments/configs/model_training.yaml \
+  --num_gpus 1
+
+# Multi-GPU with Distributed Data Parallel
+python scripts/train_all_models.py \
+  --config experiments/configs/model_training.yaml \
+  --num_gpus 2  # or 4, 8, etc.
+```
+
+**Note on DDP training:**
+- The script automatically uses `torchrun` when `--num_gpus > 1`
+- Only the main process (rank 0) logs to wandb and saves checkpoints
+- Dataset preparation is done once by the main process, then shared via cache
+- If you encounter NCCL shared memory errors in containers, clean up `/dev/shm/nccl-*` files or set `NCCL_SHM_DISABLE=1`
+
 **Training a specific combination:**
 
 ```bash
@@ -186,6 +211,9 @@ python scripts/train_all_models.py --tokenizer tokenizers/trained/bpe_v80k
 
 # Train with specific seed
 python scripts/train_all_models.py --seed 42
+
+# Combine with multi-GPU
+python scripts/train_all_models.py --model_size 50M --num_gpus 2
 
 # Dry run to see what will be trained
 python scripts/train_all_models.py --dry_run
@@ -252,10 +280,22 @@ python -m uniscale.tokenizers.train_tokenizer \
 **Train a single model:**
 
 ```bash
-python -m uniscale.models.train_lm \
+# Single GPU
+python src/uniscale/models/train_lm.py \
   --model_size 50M \
-  --tokenizer_path tokenizers/trained/bpe_v80k \
+  --tokenizer_path out/tokenizers/bpe_v80k \
   --train_file data/raw/train_data.jsonl \
+  --eval_file data/raw/val_data.jsonl \
+  --seed 42 \
+  --bf16
+
+# Multi-GPU with DDP (use torchrun)
+torchrun --nproc_per_node=2 \
+  src/uniscale/models/train_lm.py \
+  --model_size 50M \
+  --tokenizer_path out/tokenizers/bpe_v80k \
+  --train_file data/raw/train_data.jsonl \
+  --eval_file data/raw/val_data.jsonl \
   --seed 42 \
   --bf16
 ```

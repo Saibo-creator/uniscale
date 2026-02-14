@@ -92,6 +92,7 @@ def train_model(
     tokenizer_path: str,
     seed: int,
     config: ModelTrainingConfig,
+    num_gpus: int = 1,
 ) -> bool:
     """
     Train a single model.
@@ -101,6 +102,7 @@ def train_model(
         tokenizer_path: Path to tokenizer
         seed: Random seed
         config: Full configuration
+        num_gpus: Number of GPUs to use (1 for single GPU, >1 for DDP)
 
     Returns:
         True if successful, False otherwise
@@ -127,10 +129,21 @@ def train_model(
 
             print(f"  Training with {max_steps:,} steps × {num_gpus} GPUs = {total_tokens:,} tokens ({total_tokens/1e9:.2f}B)")
 
-    # Build command - use correct module path
-    cmd = [
-        sys.executable,  # Use current Python interpreter
-        "src/uniscale/models/train_lm.py",  # Fixed path
+    # Build command - use torchrun for DDP if num_gpus > 1
+    if num_gpus > 1:
+        cmd = [
+            "torchrun",
+            f"--nproc_per_node={num_gpus}",
+            "src/uniscale/models/train_lm.py",
+        ]
+    else:
+        cmd = [
+            sys.executable,  # Use current Python interpreter
+            "src/uniscale/models/train_lm.py",
+        ]
+
+    # Add training arguments
+    cmd.extend([
         "--model_size", model_size,
         "--tokenizer_path", tokenizer_path,
         "--train_file", config.train_file,
@@ -142,7 +155,7 @@ def train_model(
         "--save_steps", str(config.training.save_steps),
         "--logging_steps", str(config.training.logging_steps),
         "--wandb_project", config.wandb.project,
-    ]
+    ])
 
     # Add either num_train_epochs OR max_steps (not both)
     if max_steps is not None:
@@ -218,6 +231,12 @@ def main():
         action="store_true",
         help="Print commands without executing",
     )
+    parser.add_argument(
+        "--num_gpus",
+        type=int,
+        default=1,
+        help="Number of GPUs to use (1 for single GPU, >1 for DDP with torchrun)",
+    )
 
     args = parser.parse_args()
 
@@ -240,6 +259,7 @@ def main():
     print(f"{'='*70}")
     print(f"Config file: {args.config}")
     print(f"Training mode: {'Scaling Law (max_steps)' if using_scaling_law else 'Epoch-based'}")
+    print(f"GPUs: {args.num_gpus} ({'DDP with torchrun' if args.num_gpus > 1 else 'Single GPU'})")
     print(f"Model sizes: {model_sizes}")
 
     if using_scaling_law and config.training.max_steps_per_model:
@@ -303,7 +323,7 @@ def main():
                     )
                     continue
 
-                success = train_model(model_size, tokenizer_path, seed, config)
+                success = train_model(model_size, tokenizer_path, seed, config, num_gpus=args.num_gpus)
 
                 if success:
                     successful += 1
