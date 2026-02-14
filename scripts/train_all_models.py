@@ -93,6 +93,7 @@ def train_model(
     seed: int,
     config: ModelTrainingConfig,
     num_gpus: int = 1,
+    output_base_dir: str = "out/models",
 ) -> bool:
     """
     Train a single model.
@@ -103,6 +104,7 @@ def train_model(
         seed: Random seed
         config: Full configuration
         num_gpus: Number of GPUs to use (1 for single GPU, >1 for DDP)
+        output_base_dir: Base directory for model outputs
 
     Returns:
         True if successful, False otherwise
@@ -142,12 +144,17 @@ def train_model(
             "src/uniscale/models/train_lm.py",
         ]
 
+    # Construct output directory path
+    tokenizer_name = Path(tokenizer_path).name
+    output_dir = f"{output_base_dir}/{model_size}_{tokenizer_name}_seed{seed}"
+
     # Add training arguments
     cmd.extend([
         "--model_size", model_size,
         "--tokenizer_path", tokenizer_path,
         "--train_file", config.train_file,
         "--seed", str(seed),
+        "--output_dir", output_dir,
         "--per_device_train_batch_size", str(config.training.per_device_train_batch_size),
         "--gradient_accumulation_steps", str(config.training.gradient_accumulation_steps),
         "--learning_rate", str(config.training.learning_rate),
@@ -237,6 +244,12 @@ def main():
         default=1,
         help="Number of GPUs to use (1 for single GPU, >1 for DDP with torchrun)",
     )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="out/models",
+        help="Base output directory for model checkpoints (default: out/models)",
+    )
 
     args = parser.parse_args()
 
@@ -323,7 +336,14 @@ def main():
                     )
                     continue
 
-                success = train_model(model_size, tokenizer_path, seed, config, num_gpus=args.num_gpus)
+                success = train_model(
+                    model_size,
+                    tokenizer_path,
+                    seed,
+                    config,
+                    num_gpus=args.num_gpus,
+                    output_base_dir=args.output_dir,
+                )
 
                 if success:
                     successful += 1

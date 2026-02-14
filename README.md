@@ -63,20 +63,27 @@ scale-invariant-tokenizer-pick/
 For a consistent development environment with GPU support, we recommend using:
 
 ```bash
-docker pull nvcr.io/nvidia/pytorch:24.04-py3
+docker pull nvcr.io/nvidia/pytorch:25.09-py3
 ```
-
-This NVIDIA PyTorch container includes CUDA, cuDNN, and other essential dependencies pre-configured.
+This image includes PyTorch 2.10, which is required for this project.
 
 ### Package Installation
 
-This project is organized as a Python package called `uniscale`. Install it in editable mode:
+This project is organized as a Python package called `uniscale`. Clone the repository and install in editable mode:
 
 ```bash
-pip install git+https://github.com/Saibo-creator/uniscale.git
+# Clone the repository
+git clone https://github.com/Saibo-creator/uniscale.git
+cd uniscale
+
+# Install in editable mode
+pip install -e .
 ```
 
-After installation, you can import the package anywhere:
+This installs the package in editable mode, allowing you to:
+- Run scripts from the `scripts/` directory
+- Use experiment configurations from `experiments/configs/`
+- Import the package anywhere:
 
 ```python
 from uniscale.tokenizers.train_tokenizer import train_bpe_tokenizer
@@ -215,11 +222,16 @@ python scripts/train_all_models.py --seed 42
 # Combine with multi-GPU
 python scripts/train_all_models.py --model_size 50M --num_gpus 2
 
+# Customize output directory
+python scripts/train_all_models.py --output_dir experiments/run1
+
 # Dry run to see what will be trained
 python scripts/train_all_models.py --dry_run
 ```
 
-Output: `models/checkpoints/{model_size}_{tokenizer}_{seed}/`
+**Default output structure:**
+- Models are saved to `out/models/{model_size}_{tokenizer}_{seed}/`
+- Use `--output_dir` to change the base directory (e.g., `--output_dir experiments/run1`)
 
 ### 5. Evaluate Models
 

@@ -34,23 +34,23 @@ training:
   # Token-based training (NOT epoch-based)
   # max_steps calculated as: (target_tokens) / (batch_size * grad_accum * num_gpus * max_length)
   #
-  # With batch_size=4, grad_accum=8, num_gpus=4, max_length=2048:
-  #   - tokens_per_step = 4 * 8 * 4 * 2048 = 262,144 tokens
+  # With batch_size=4, grad_accum=8, num_gpus=4, max_length=1024:
+  #   - tokens_per_step = 4 * 8 * 4 * 1024 = 131,072 tokens
   #
   # Model size → Target tokens → Max steps (4 GPUs):
-  #   50M  → 1B tokens  → 3,815 steps
-  #   100M → 2B tokens  → 7,629 steps
-  #   300M → 6B tokens  → 22,888 steps
-  #   1B   → 20B tokens → 76,294 steps
+  #   50M  → 1B tokens  → 7,630 steps
+  #   100M → 2B tokens  → 15,258 steps
+  #   300M → 6B tokens  → 45,776 steps
+  #   1B   → 20B tokens → 152,588 steps
   #
-  # Note: Using batch_size=4 with grad_accum=8 for FP32 memory efficiency
+  # Note: Using batch_size=4 with grad_accum=8 and max_length=1024 for FP32 memory efficiency
 
   # The training script will automatically set max_steps based on model size
   max_steps_per_model:
-    "50M": 3815     # 1B tokens / 262144 ≈ 3,815 steps (4 GPUs)
-    "100M": 7629    # 2B tokens / 262144 ≈ 7,629 steps (4 GPUs)
-    "300M": 22888   # 6B tokens / 262144 ≈ 22,888 steps (4 GPUs)
-    "1B": 76294     # 20B tokens / 262144 ≈ 76,294 steps (4 GPUs)
+    "50M": 7630      # 1B tokens / 131072 ≈ 7,630 steps (4 GPUs)
+    "100M": 15258    # 2B tokens / 131072 ≈ 15,258 steps (4 GPUs)
+    "300M": 45776    # 6B tokens / 131072 ≈ 45,776 steps (4 GPUs)
+    "1B": 152588     # 20B tokens / 131072 ≈ 152,588 steps (4 GPUs)
 
   # Batch configuration (reduced for FP32 memory constraints)
   per_device_train_batch_size: 4  # Reduced from 8 to fit in memory
@@ -69,7 +69,7 @@ training:
   warmup_ratio: 0.01  # 1% of training for warmup
 
   # Sequence length
-  max_length: 2048
+  max_length: 1024
 
   # Mixed precision training
   # Using FP32 (full precision) for stability
@@ -86,7 +86,7 @@ training:
   eval_steps: 2500  # Eval every 2.5k steps
 
   # Logging
-  logging_steps: 100
+  logging_steps: 10
   logging_first_step: true
 
   # Performance
