@@ -10,7 +10,7 @@ eval_file: "data/raw/val_data.jsonl"     # 29MB validation set
 model_sizes:
   - "50M"   # 50M params → 1B tokens
   - "100M"  # 100M params → 2B tokens
-  # - "300M"  # 300M params → 6B tokens (uncomment when ready)
+  - "300M"  # 300M params → 6B tokens (uncomment when ready)
   # - "1B"    # 1B params → 20B tokens (uncomment when ready)
 
 # Tokenizers to use - start with 2 for comparison
@@ -83,7 +83,7 @@ training:
 
   # Evaluation
   evaluation_strategy: "steps"
-  eval_steps: 2500  # Eval every 2.5k steps
+  eval_steps: 100  # Eval every 100 steps
 
   # Logging
   logging_steps: 10
@@ -110,10 +110,6 @@ wandb:
 # Hardware configuration
 # Adjust based on your GPU memory
 hardware:
-  # For 50M model: ~2GB GPU memory
-  # For 100M model: ~4GB GPU memory
-  # For 300M model: ~12GB GPU memory
-  # For 1B model: ~40GB GPU memory (may need gradient checkpointing)
   gradient_checkpointing: false  # Enable for larger models if OOM
   use_cpu: false
 
@@ -121,40 +117,41 @@ hardware:
 model:
   # Based on swiss-ai/Apertus-8B-2509
   # We scale down to our target sizes
-  hidden_act: "silu"
+  hidden_act: "xielu"
   initializer_range: 0.02
   max_position_embeddings: 2048
-  rope_theta: 10000.0
+  rope_theta: 500000.0
   rms_norm_eps: 1e-05
   tie_word_embeddings: false
   use_cache: true
+  qk_norm: true  # QK LayerNorm - key Apertus architectural feature
 
   # Size-specific configs (automatically selected based on model_size)
   size_configs:
     "50M":
       hidden_size: 512
-      intermediate_size: 1376  # 2.688 * hidden_size
+      intermediate_size: 2816  # 5.5 * hidden_size (Apertus uses ~5-6x)
       num_hidden_layers: 16
       num_attention_heads: 8
       num_key_value_heads: 2  # GQA with ratio 4:1
 
     "100M":
       hidden_size: 768
-      intermediate_size: 2048  # ~2.67 * hidden_size
+      intermediate_size: 4224  # 5.5 * hidden_size (Apertus uses ~5-6x)
       num_hidden_layers: 12
       num_attention_heads: 12
       num_key_value_heads: 3  # GQA with ratio 4:1
 
     "300M":
       hidden_size: 1024
-      intermediate_size: 2752  # 2.688 * hidden_size
+      intermediate_size: 5632  # 5.5 * hidden_size (Apertus uses ~5-6x)
       num_hidden_layers: 24
       num_attention_heads: 16
       num_key_value_heads: 4  # GQA with ratio 4:1
 
     "1B":
       hidden_size: 2048
-      intermediate_size: 5504  # 2.688 * hidden_size
-      num_hidden_layers: 24
+      intermediate_size: 12288  # 6 * hidden_size (matches reference 1B exactly)
+      num_hidden_layers: 16  # Matches reference 1B (wider layers, not deeper)
       num_attention_heads: 32
       num_key_value_heads: 8  # GQA with ratio 4:1
