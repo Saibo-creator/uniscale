@@ -317,8 +317,14 @@ def main():
     # Initialize model
     if is_main_process:
         print("Initializing model...")
-    # Always initialize in fp32, let Trainer handle mixed precision via AMP
-    model = AutoModelForCausalLM.from_config(config, torch_dtype=torch.float32)
+    # Determine dtype based on training arguments
+    if args.bf16:
+        dtype = torch.bfloat16
+    elif args.fp16:
+        dtype = torch.float16
+    else:
+        dtype = torch.float32
+    model = AutoModelForCausalLM.from_config(config, torch_dtype=dtype)
     if is_main_process:
         print(f"Model initialized with {model.num_parameters():,} parameters (dtype: {model.dtype})")
 
