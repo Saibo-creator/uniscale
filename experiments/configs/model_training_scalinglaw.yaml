@@ -34,30 +34,30 @@ training:
   # Token-based training (NOT epoch-based)
   # max_steps calculated as: (target_tokens) / (batch_size * grad_accum * num_gpus * max_length)
   #
-  # With batch_size=4, grad_accum=8, num_gpus=4, max_length=1024:
-  #   - tokens_per_step = 4 * 8 * 4 * 1024 = 131,072 tokens
+  # With batch_size=8, grad_accum=4, num_gpus=4, max_length=2048:
+  #   - tokens_per_step = 8 * 4 * 4 * 2048 = 262,144 tokens (256K)
   #
   # Model size → Target tokens → Max steps (4 GPUs):
-  #   50M  → 1B tokens  → 7,630 steps
-  #   100M → 2B tokens  → 15,258 steps
-  #   300M → 6B tokens  → 45,776 steps
-  #   1B   → 20B tokens → 152,588 steps
+  #   50M  → 1B tokens  → 3,815 steps
+  #   100M → 2B tokens  → 7,630 steps
+  #   300M → 6B tokens  → 22,888 steps
+  #   1B   → 20B tokens → 76,294 steps
   #
-  # Note: Using batch_size=4 with grad_accum=8 and max_length=1024 for FP32 memory efficiency
+  # Note: 256K tokens/step provides good training dynamics for scaling law studies
 
   # The training script will automatically set max_steps based on model size
   max_steps_per_model:
-    "50M": 7630      # 1B tokens / 131072 ≈ 7,630 steps (4 GPUs)
-    "100M": 15258    # 2B tokens / 131072 ≈ 15,258 steps (4 GPUs)
-    "300M": 45776    # 6B tokens / 131072 ≈ 45,776 steps (4 GPUs)
-    "1B": 152588     # 20B tokens / 131072 ≈ 152,588 steps (4 GPUs)
+    "50M": 3815      # 1B tokens / 262144 ≈ 3,815 steps (4 GPUs)
+    "100M": 7630     # 2B tokens / 262144 ≈ 7,630 steps (4 GPUs)
+    "300M": 22888    # 6B tokens / 262144 ≈ 22,888 steps (4 GPUs)
+    "1B": 76294      # 20B tokens / 262144 ≈ 76,294 steps (4 GPUs)
 
-  # Batch configuration (reduced for FP32 memory constraints)
-  per_device_train_batch_size: 16  # Reduced from 8 to fit in memory
-  per_device_eval_batch_size: 32   # Reduced from 16
-  gradient_accumulation_steps: 8   # Adjusted to maintain effective batch size
-  # Effective batch per GPU: 4 * 8 = 32 (same as before)
-  # Total effective batch (4 GPUs): 32 * 4 = 128
+  # Batch configuration (optimized for 256K tokens/step with efficiency)
+  per_device_train_batch_size: 8   # 8 samples per GPU 
+  per_device_eval_batch_size: 16   # Can use larger batch for eval
+  gradient_accumulation_steps: 4   # Accumulate gradients over 4 steps (2x more efficient than 8)
+  # Effective batch per GPU: 8 * 4 = 32 sequences = 65,536 tokens
+  # Total effective batch (4 GPUs): 32 * 4 = 128 sequences = 262,144 tokens
 
   # Optimization
   learning_rate: 5.0e-4
