@@ -70,8 +70,12 @@ def prepare_dataset(
         num_proc = max(1, int(mp.cpu_count() * 0.8))
         print(f"Auto-detected {num_proc} CPU cores for tokenization (80% of {mp.cpu_count()})")
 
-    # Load dataset
-    dataset = load_dataset("json", data_files=data_file, split="train")
+    # Load dataset (uses HF_DATASETS_CACHE environment variable for cache location)
+    dataset = load_dataset(
+        "json",
+        data_files=data_file,
+        split="train",
+    )
 
     # Tokenize function
     def tokenize_function(examples):
@@ -85,13 +89,15 @@ def prepare_dataset(
         )
         return outputs
 
-    # Tokenize dataset
+    # Tokenize dataset with explicit cache
+    # HuggingFace will automatically generate cache filenames based on transformation hash
     tokenized_dataset = dataset.map(
         tokenize_function,
         batched=True,
         num_proc=num_proc,
         remove_columns=dataset.column_names,
         desc="Tokenizing dataset",
+        load_from_cache_file=True,  # Explicitly enable cache loading
     )
 
     return tokenized_dataset
@@ -324,8 +330,18 @@ def main():
         else:
             print("Will use FP32 full precision training")
 
+    if "RANK" in os.environ:
+        # local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        # # 必须在 init_process_group 之前设置
+        # torch.cuda.set_device(local_rank)
+        torch.distributed.init_process_group(backend="nccl") # 或者 "gloo"
+
+    # Wait for main process to finish preparing datasets and writing cache
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        print(f"[Rank {local_rank}] Waiting at barrier for main process to finish dataset preparation...", flush=True)
+
     # Prepare dataset - ONLY on main process to avoid conflicts
-    # Other processes will load from cache
+    # Other processes will load from cache (shared via HF_DATASETS_CACHE env var)
     if is_main_process:
         print("Preparing training dataset...")
         train_dataset = prepare_dataset(
@@ -347,27 +363,33 @@ def main():
             )
             print(f"Evaluation dataset: {len(eval_dataset)} examples")
 
-    # Wait for main process to finish preparing datasets
+    # Wait for main process to finish preparing datasets and writing cache
     if torch.distributed.is_available() and torch.distributed.is_initialized():
+        print(f"[Rank {local_rank}] Waiting at barrier for main process to finish dataset preparation...", flush=True)
         torch.distributed.barrier()
+        print(f"[Rank {local_rank}] Barrier passed, loading datasets from cache...", flush=True)
 
     # Non-main processes load the cached datasets
     if not is_main_process:
+        print(f"[Rank {local_rank}] Loading training dataset from cache (should be instant)...", flush=True)
         train_dataset = prepare_dataset(
             args.train_file,
             tokenizer,
             max_length=args.max_length,
             num_proc=1,  # Use single process to load from cache
         )
+        print(f"[Rank {local_rank}] Training dataset loaded: {len(train_dataset)} examples", flush=True)
 
         eval_dataset = None
         if args.eval_file:
+            print(f"[Rank {local_rank}] Loading evaluation dataset from cache...", flush=True)
             eval_dataset = prepare_dataset(
                 args.eval_file,
                 tokenizer,
                 max_length=args.max_length,
                 num_proc=1,
             )
+            print(f"[Rank {local_rank}] Evaluation dataset loaded: {len(eval_dataset)} examples", flush=True)
 
     # Data collator
     data_collator = DataCollatorForLanguageModeling(
