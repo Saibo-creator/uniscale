@@ -24,6 +24,7 @@ def submit_slurm_job(
     gpus_per_node: int = 4,
     time: str = "48:00:00",
     partition: str = "normal",
+    account: str = None,
     job_name: Optional[str] = None,
     dry_run: bool = False,
 ) -> bool:
@@ -40,6 +41,7 @@ def submit_slurm_job(
         gpus_per_node: GPUs per node
         time: Time limit (HH:MM:SS)
         partition: SLURM partition name
+        account: SLURM account/project name
         job_name: Job name (optional)
         dry_run: If True, print command without submitting
 
@@ -69,6 +71,7 @@ def submit_slurm_job(
         f"--gpus-per-node={gpus_per_node}",
         f"--time={time}",
         f"--partition={partition}",
+        f"--account={account}",
         f"--export={env_string}",
         "scripts/slurm_train.sbatch",
     ]
@@ -81,6 +84,7 @@ def submit_slurm_job(
     print(f"Seed: {seed}")
     print(f"Resources: {nodes} nodes × {gpus_per_node} GPUs = {nodes * gpus_per_node} GPUs")
     print(f"Time limit: {time}")
+    print(f"Account: {account}")
     print(f"Command: {' '.join(cmd)}")
     print(f"{'='*70}")
 
@@ -146,8 +150,14 @@ def main():
     parser.add_argument(
         "--partition",
         type=str,
-        default="gpu",
+        default="normal",
         help="SLURM partition name (default: gpu)",
+    )
+    parser.add_argument(
+        "--account",
+        type=str,
+        required=True,
+        help="SLURM account/project name (required, e.g., -A <account>)",
     )
     parser.add_argument(
         "--output_dir",
@@ -197,6 +207,7 @@ def main():
     print(f"  Total GPUs: {total_gpus}")
     print(f"  Time limit: {args.time}")
     print(f"  Partition: {args.partition}")
+    print(f"  Account: {args.account}")
     print(f"{'='*70}\n")
 
     if args.dry_run:
@@ -232,6 +243,7 @@ def main():
                     gpus_per_node=args.gpus_per_node,
                     time=args.time,
                     partition=args.partition,
+                    account=args.account,
                     dry_run=args.dry_run,
                 )
 
