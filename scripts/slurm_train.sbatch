@@ -5,7 +5,7 @@
 #SBATCH --gpus-per-node=4            # 4 GPUs per node
 #SBATCH --cpus-per-task=32           # CPUs per task (adjust for your cluster)
 #SBATCH --time=11:30:00              # Maximum runtime
-#SBATCH --mem=0                      # Use all node memory (or specify like --mem=256G)
+# Memory allocation: Let SLURM use default per-GPU memory, or specify like --mem=256G if needed
 #SBATCH --partition=gpu              # GPU partition name (adjust for your cluster)
 #SBATCH --output=logs/slurm-%j.out   # Output log
 #SBATCH --error=logs/slurm-%j.err    # Error log
@@ -59,6 +59,7 @@ TOKENIZER_PATH=${TOKENIZER_PATH:-"out/tokenizers/unigram_32k"}
 SEED=${SEED:-42}
 CONFIG_FILE=${CONFIG_FILE:-"experiments/configs/model_training.yaml"}
 OUTPUT_DIR=${OUTPUT_DIR:-"out/models"}
+CONTAINER_ENV=${CONTAINER_ENV:-"pytorch_env"}  # Enroot environment name
 
 echo "Training Configuration:"
 echo "  Model Size: $MODEL_SIZE"
@@ -66,6 +67,7 @@ echo "  Tokenizer: $TOKENIZER_PATH"
 echo "  Seed: $SEED"
 echo "  Config: $CONFIG_FILE"
 echo "  Output Dir: $OUTPUT_DIR"
+echo "  Container: $CONTAINER_ENV"
 echo "======================================================================"
 
 # Activate conda environment (if using)
@@ -80,9 +82,11 @@ TOTAL_GPUS=$((SLURM_NNODES * SLURM_GPUS_ON_NODE))
 echo "Total GPUs: $TOTAL_GPUS (${SLURM_NNODES} nodes × ${SLURM_GPUS_ON_NODE} GPUs/node)"
 echo "======================================================================"
 
-# Use srun to launch torchrun on all nodes
+# Use srun to launch torchrun on all nodes with Enroot container
 # Each node will launch a torchrun instance to manage all GPU processes on that node
-srun bash -c "
+srun --environment=$CONTAINER_ENV bash -c "
+    cd ~/uniscale/uniscale_code && \
+    pip install -e . > /dev/null 2>&1 && \
     torchrun \
         --nnodes=$SLURM_NNODES \
         --node_rank=$SLURM_NODEID \
