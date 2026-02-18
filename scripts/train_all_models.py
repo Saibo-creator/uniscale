@@ -134,7 +134,8 @@ def train_model(
     # Build command - use torchrun for DDP if num_gpus > 1
     if num_gpus > 1:
         cmd = [
-            "torchrun",
+            sys.executable,  # Use current Python interpreter
+            "-m", "torch.distributed.run",
             f"--nproc_per_node={num_gpus}",
             "src/uniscale/models/train_lm.py",
         ]

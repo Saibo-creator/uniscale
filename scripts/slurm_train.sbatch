@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=scale-inv-tokenizer
 #SBATCH --nodes=4                    # Number of nodes
-#SBATCH --ntasks-per-node=1          # 1 task per node
+#SBATCH --ntasks-per-node=4          # 4 tasks per node (one per GPU)
 #SBATCH --gpus-per-node=4            # 4 GPUs per node
-#SBATCH --cpus-per-task=32           # CPUs per task (adjust for your cluster)
+#SBATCH --cpus-per-task=8            # CPUs per task (32 / 4 = 8 per GPU)
 #SBATCH --time=11:30:00              # Maximum runtime
 # Memory allocation: Let SLURM use default per-GPU memory, or specify like --mem=256G if needed
-#SBATCH --partition=gpu              # GPU partition name (adjust for your cluster)
-#SBATCH --output=logs/%j/node-%N.out   # Output log per node (%j=job ID, %N=node name)
-#SBATCH --error=logs/%j/node-%N.err    # Error log per node
+#SBATCH --partition=normal              # GPU partition name (adjust for your cluster)
+#SBATCH --output=logs/slurm-%j.out   # Output log
+#SBATCH --error=logs/slurm-%j.err    # Error log
 
 # ============================================================================
 # SLURM Multi-Node Distributed Training Script
@@ -37,11 +37,10 @@ echo "CPUs per task: $SLURM_CPUS_PER_TASK"
 echo "Current Node: $SLURMD_NODENAME"
 echo "======================================================================"
 
-
 export PYTHONUNBUFFERED=1  # Disable Python output buffering for real-time logs
 
-# Create job-specific logs directory
-mkdir -p logs/$SLURM_JOB_ID
+# Create logs directory
+mkdir -p logs
 
 # Set environment variables (if needed)
 # export NCCL_DEBUG=INFO
@@ -58,11 +57,11 @@ echo "======================================================================"
 
 # From environment variables or use defaults
 MODEL_SIZE=${MODEL_SIZE:-"50M"}
-TOKENIZER_PATH=${TOKENIZER_PATH:-"out/tokenizers/unigram_32k"}
+TOKENIZER_PATH=${TOKENIZER_PATH:-"out/tokenizers/bpe_v128k"}
 SEED=${SEED:-42}
 CONFIG_FILE=${CONFIG_FILE:-"experiments/configs/model_training.yaml"}
 OUTPUT_DIR=${OUTPUT_DIR:-"out/models"}
-CONTAINER_ENV=${CONTAINER_ENV:-"pytorch_env"}  # Enroot environment name
+CONTAINER_ENV=${CONTAINER_ENV:-"pytorch_210_env"}  # Enroot environment name
 
 echo "Training Configuration:"
 echo "  Model Size: $MODEL_SIZE"
@@ -80,30 +79,30 @@ echo "======================================================================"
 # Or use virtualenv
 # source /path/to/venv/bin/activate
 
-# Calculate total GPUs
+# Calculate total GPUs and set WORLD_SIZE
 TOTAL_GPUS=$((SLURM_NNODES * SLURM_GPUS_ON_NODE))
+export WORLD_SIZE=$TOTAL_GPUS
 echo "Total GPUs: $TOTAL_GPUS (${SLURM_NNODES} nodes × ${SLURM_GPUS_ON_NODE} GPUs/node)"
+echo "World Size: $WORLD_SIZE"
 echo "======================================================================"
 
-# Use srun to launch torchrun on all nodes with Enroot container
-# Each node will launch a torchrun instance to manage all GPU processes on that node
-echo "Starting training on all nodes..."
-srun --environment=$CONTAINER_ENV bash -c "
-    echo '[Node \$SLURM_NODEID] Starting setup...' && \
-    cd ~/uniscale/uniscale_code || { echo '[Node \$SLURM_NODEID] ERROR: Failed to cd to ~/uniscale/uniscale_code'; exit 1; } && \
-    echo '[Node \$SLURM_NODEID] Installing package...' && \
-    pip install -e . || { echo '[Node \$SLURM_NODEID] ERROR: pip install failed'; exit 1; } && \
-    echo '[Node \$SLURM_NODEID] Starting torchrun...' && \
-    torchrun \
-        --nnodes=$SLURM_NNODES \
-        --node_rank=$SLURM_NODEID \
-        --nproc_per_node=$SLURM_GPUS_ON_NODE \
-        --master_addr=$MASTER_ADDR \
-        --master_port=$MASTER_PORT \
-        src/uniscale/models/train_lm.py \
+# Set Python path to pre-installed venv
+PYTHON_PATH="/iopsstor/scratch/cscs/saibogeng/venvs/uniscale/bin/python"
+echo "Using Python: $PYTHON_PATH"
+echo "======================================================================"
+
+# Use srun to directly launch Python training on all GPUs with Enroot container
+# srun will launch one process per GPU (SLURM_NNODES × SLURM_GPUS_ON_NODE total processes)
+# SLURM automatically provides SLURM_PROCID (global rank) and SLURM_LOCALID (local rank)
+echo "Starting distributed training with pure srun (no torchrun)..."
+srun --environment=$CONTAINER_ENV \
+     --container-mounts=/capstor/store/cscs/swissai/infra01/users/$USER:/capstor/store/cscs/swissai/infra01/users/$USER,/iopsstor/scratch/cscs/$USER:/iopsstor/scratch/cscs/$USER \
+     bash -c "
+    echo '[Rank \$SLURM_PROCID / LocalRank \$SLURM_LOCALID] Starting training...' && \
+    cd ~/uniscale/uniscale_code || { echo '[Rank \$SLURM_PROCID] ERROR: Failed to cd to ~/uniscale/uniscale_code'; exit 1; } && \
+    RANK=\$SLURM_PROCID LOCAL_RANK=\$SLURM_LOCALID $PYTHON_PATH src/uniscale/models/train_lm.py \
         --model_size $MODEL_SIZE \
         --tokenizer_path $TOKENIZER_PATH \
-        --train_file \$(grep '^train_file:' $CONFIG_FILE | awk '{print \$2}') \
         --seed $SEED \
         --output_dir ${OUTPUT_DIR}/${MODEL_SIZE}_\$(basename $TOKENIZER_PATH)_seed${SEED} \
         --per_device_train_batch_size 8 \
