@@ -7,8 +7,8 @@
 #SBATCH --time=11:30:00              # Maximum runtime
 # Memory allocation: Let SLURM use default per-GPU memory, or specify like --mem=256G if needed
 #SBATCH --partition=gpu              # GPU partition name (adjust for your cluster)
-#SBATCH --output=logs/slurm-%j.out   # Output log
-#SBATCH --error=logs/slurm-%j.err    # Error log
+#SBATCH --output=logs/%j/node-%N.out   # Output log per node (%j=job ID, %N=node name)
+#SBATCH --error=logs/%j/node-%N.err    # Error log per node
 
 # ============================================================================
 # SLURM Multi-Node Distributed Training Script
@@ -37,8 +37,11 @@ echo "CPUs per task: $SLURM_CPUS_PER_TASK"
 echo "Current Node: $SLURMD_NODENAME"
 echo "======================================================================"
 
-# Create logs directory
-mkdir -p logs
+
+export PYTHONUNBUFFERED=1  # Disable Python output buffering for real-time logs
+
+# Create job-specific logs directory
+mkdir -p logs/$SLURM_JOB_ID
 
 # Set environment variables (if needed)
 # export NCCL_DEBUG=INFO
@@ -84,9 +87,13 @@ echo "======================================================================"
 
 # Use srun to launch torchrun on all nodes with Enroot container
 # Each node will launch a torchrun instance to manage all GPU processes on that node
+echo "Starting training on all nodes..."
 srun --environment=$CONTAINER_ENV bash -c "
-    cd ~/uniscale/uniscale_code && \
-    pip install -e . > /dev/null 2>&1 && \
+    echo '[Node \$SLURM_NODEID] Starting setup...' && \
+    cd ~/uniscale/uniscale_code || { echo '[Node \$SLURM_NODEID] ERROR: Failed to cd to ~/uniscale/uniscale_code'; exit 1; } && \
+    echo '[Node \$SLURM_NODEID] Installing package...' && \
+    pip install -e . || { echo '[Node \$SLURM_NODEID] ERROR: pip install failed'; exit 1; } && \
+    echo '[Node \$SLURM_NODEID] Starting torchrun...' && \
     torchrun \
         --nnodes=$SLURM_NNODES \
         --node_rank=$SLURM_NODEID \
