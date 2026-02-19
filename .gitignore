@@ -1,5 +1,8 @@
 # Python
 __pycache__/
+.claude
+data_small
+/tokenizers
 *.py[cod]
 *$py.class
 *.so

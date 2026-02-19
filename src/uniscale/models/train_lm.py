@@ -342,14 +342,13 @@ def main():
         # torch.cuda.set_device(local_rank)
         torch.distributed.init_process_group(backend="nccl") # 或者 "gloo"
 
-    # Wait for main process to finish preparing datasets and writing cache
-    if torch.distributed.is_available() and torch.distributed.is_initialized():
-        print(f"[Rank {local_rank}] Waiting at barrier for main process to finish dataset preparation...", flush=True)
-
     # Prepare dataset - ONLY on main process to avoid conflicts
     # Other processes will load from cache (shared via HF_DATASETS_CACHE env var)
     if is_main_process:
-        print("Preparing training dataset...")
+        print(f"Preparing training dataset... from {args.train_file}", flush=True)
+        # check if the training file exists before trying to prepare the dataset
+        if not os.path.isfile(args.train_file):
+            raise FileNotFoundError(f"Training file not found: {args.train_file}")
         train_dataset = prepare_dataset(
             args.train_file,
             tokenizer,
