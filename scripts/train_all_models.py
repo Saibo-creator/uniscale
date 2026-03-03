@@ -9,22 +9,26 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import yaml
+
+# Allow importing from the project root (src/uniscale/...)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from src.uniscale.models.architectures.model_config import estimate_parameters_for_size
 
 
 @dataclass
 class TrainingHyperparameters:
     """Training hyperparameters."""
 
-    # Either num_train_epochs OR max_steps (via max_steps_per_model)
+    # Either num_train_epochs OR Chinchilla-derived max_steps (via tokens_per_param)
     num_train_epochs: Optional[int] = None
-    max_steps_per_model: Optional[Dict[str, int]] = None
+    tokens_per_param: Optional[int] = None
 
     per_device_train_batch_size: int = 8
     per_device_eval_batch_size: int = 16
-    gradient_accumulation_steps: int = 4
+    tokens_per_step: int = 262144  # gradient_accumulation_steps is derived from this at runtime
     learning_rate: float = 5e-4
     warmup_steps: Optional[int] = None
     warmup_ratio: Optional[float] = None
@@ -59,8 +63,8 @@ class WandBConfig:
 class ModelTrainingConfig:
     """Configuration for training all models."""
 
-    train_file: str
-    eval_file: Optional[str]
+    data_dir: str
+    eval_docs: int
     model_sizes: List[str]
     tokenizers: List[str]
     seeds: List[int]
@@ -77,14 +81,39 @@ class ModelTrainingConfig:
         wandb_config = WandBConfig(**config_dict.get("wandb", {}))
 
         return cls(
-            train_file=config_dict["train_file"],
-            eval_file=config_dict.get("eval_file"),
+            data_dir=config_dict["data_dir"],
+            eval_docs=config_dict.get("eval_docs", 3000),
             model_sizes=config_dict["model_sizes"],
             tokenizers=config_dict["tokenizers"],
             seeds=config_dict["seeds"],
             training=training_params,
             wandb=wandb_config,
         )
+
+
+def _get_tokenizer_vocab_size(tokenizer_path: str) -> int:
+    """Return the effective vocab size (including added special tokens) for a local tokenizer."""
+    from transformers import AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(tokenizer_path)
+    return len(tok)
+
+
+def _compute_scaling_law_steps(
+    model_size: str,
+    tokenizer_path: str,
+    tokens_per_param: int,
+    actual_tokens_per_step: int,
+) -> tuple[int, int, int]:
+    """
+    Derive max_steps from the Chinchilla tokens-per-parameter ratio.
+
+    Returns (max_steps, total_tokens, param_count).
+    """
+    vocab_size = _get_tokenizer_vocab_size(tokenizer_path)
+    param_count = estimate_parameters_for_size(model_size, vocab_size)
+    total_tokens = tokens_per_param * param_count
+    max_steps = total_tokens // actual_tokens_per_step
+    return max_steps, total_tokens, param_count
 
 
 def train_model(
@@ -109,27 +138,34 @@ def train_model(
     Returns:
         True if successful, False otherwise
     """
+    # Derive gradient_accumulation_steps from tokens_per_step
+    tokens_per_device_step = config.training.per_device_train_batch_size * config.training.max_length
+    gradient_accumulation_steps = config.training.tokens_per_step // (tokens_per_device_step * num_gpus)
+    gradient_accumulation_steps = max(1, gradient_accumulation_steps)
+    actual_tokens_per_step = tokens_per_device_step * num_gpus * gradient_accumulation_steps
+    if actual_tokens_per_step != config.training.tokens_per_step:
+        print(
+            f"  Warning: tokens_per_step={config.training.tokens_per_step:,} is not exactly divisible "
+            f"by batch×max_length×gpus={tokens_per_device_step * num_gpus:,}. "
+            f"Using gradient_accumulation_steps={gradient_accumulation_steps} "
+            f"→ actual tokens_per_step={actual_tokens_per_step:,}"
+        )
+    else:
+        print(f"  gradient_accumulation_steps={gradient_accumulation_steps} ({actual_tokens_per_step:,} tokens/step)")
+
     # Calculate max_steps if using scaling law training
     max_steps = None
     total_tokens = None
 
-    if config.training.max_steps_per_model:
-        if model_size in config.training.max_steps_per_model:
-            max_steps = config.training.max_steps_per_model[model_size]
-
-            # Calculate total tokens (account for multi-GPU)
-            import torch
-            num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
-
-            tokens_per_step = (
-                config.training.per_device_train_batch_size
-                * config.training.gradient_accumulation_steps
-                * config.training.max_length
-                * num_gpus
-            )
-            total_tokens = max_steps * tokens_per_step
-
-            print(f"  Training with {max_steps:,} steps × {num_gpus} GPUs = {total_tokens:,} tokens ({total_tokens/1e9:.2f}B)")
+    if config.training.tokens_per_param is not None:
+        max_steps, total_tokens, param_count = _compute_scaling_law_steps(
+            model_size, tokenizer_path, config.training.tokens_per_param, actual_tokens_per_step
+        )
+        print(
+            f"  Model params: {param_count/1e9:.3f}B  →  "
+            f"target tokens: {total_tokens/1e9:.2f}B  →  "
+            f"max_steps: {max_steps:,}  (tokens_per_param={config.training.tokens_per_param})"
+        )
 
     # Build command - use torchrun for DDP if num_gpus > 1
     if num_gpus > 1:
@@ -153,11 +189,12 @@ def train_model(
     cmd.extend([
         "--model_size", model_size,
         "--tokenizer_path", tokenizer_path,
-        "--train_file", config.train_file,
+        "--train_dir", config.data_dir,
+        "--eval_docs", str(config.eval_docs),
         "--seed", str(seed),
         "--output_dir", output_dir,
         "--per_device_train_batch_size", str(config.training.per_device_train_batch_size),
-        "--gradient_accumulation_steps", str(config.training.gradient_accumulation_steps),
+        "--gradient_accumulation_steps", str(gradient_accumulation_steps),
         "--learning_rate", str(config.training.learning_rate),
         "--max_length", str(config.training.max_length),
         "--save_steps", str(config.training.save_steps),
@@ -171,11 +208,10 @@ def train_model(
     elif config.training.num_train_epochs is not None:
         cmd.extend(["--num_train_epochs", str(config.training.num_train_epochs)])
     else:
-        raise ValueError("Must specify either num_train_epochs or max_steps_per_model in config")
+        raise ValueError("Must specify either num_train_epochs or tokens_per_param in config")
 
-    # Add eval file if specified
-    if config.eval_file:
-        cmd.extend(["--eval_file", config.eval_file])
+    # Add eval settings if eval split is requested
+    if config.eval_docs > 0:
         cmd.extend(["--eval_steps", str(config.training.eval_steps)])
 
     # Add warmup configuration
@@ -266,33 +302,34 @@ def main():
     total_runs = len(model_sizes) * len(tokenizers) * len(seeds)
 
     # Determine training mode
-    using_scaling_law = config.training.max_steps_per_model is not None
+    using_scaling_law = config.training.tokens_per_param is not None
 
     print(f"\n{'='*70}")
     print("Training Configuration")
     print(f"{'='*70}")
     print(f"Config file: {args.config}")
-    print(f"Training mode: {'Scaling Law (max_steps)' if using_scaling_law else 'Epoch-based'}")
+    print(f"Training mode: {'Scaling Law (tokens_per_param)' if using_scaling_law else 'Epoch-based'}")
     print(f"GPUs: {args.num_gpus} ({'DDP with torchrun' if args.num_gpus > 1 else 'Single GPU'})")
     print(f"Model sizes: {model_sizes}")
 
-    if using_scaling_law and config.training.max_steps_per_model:
-        # Detect number of GPUs
-        import torch
-        num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    if using_scaling_law:
+        num_gpus = args.num_gpus
 
-        print(f"\nScaling law targets (20 tokens/param) - Using {num_gpus} GPU(s):")
+        _tpds = config.training.per_device_train_batch_size * config.training.max_length
+        _grad_accum = max(1, config.training.tokens_per_step // (_tpds * num_gpus))
+        _actual_tps = _tpds * num_gpus * _grad_accum
+
+        print(f"\nScaling law targets ({config.training.tokens_per_param} tokens/param) - Using {num_gpus} GPU(s):")
         for size in model_sizes:
-            if size in config.training.max_steps_per_model:
-                steps = config.training.max_steps_per_model[size]
-                tokens_per_step = (
-                    config.training.per_device_train_batch_size
-                    * config.training.gradient_accumulation_steps
-                    * config.training.max_length
-                    * num_gpus  # Account for multi-GPU training
+            for tok_path in tokenizers:
+                steps, total_tokens, param_count = _compute_scaling_law_steps(
+                    size, tok_path, config.training.tokens_per_param, _actual_tps
                 )
-                total_tokens = steps * tokens_per_step
-                print(f"  {size:>5s}: {steps:>7,} steps × {num_gpus} GPUs = {total_tokens/1e9:>5.2f}B tokens")
+                tok_name = Path(tok_path).name
+                print(
+                    f"  {size:>5s} + {tok_name}: {param_count/1e9:.3f}B params → "
+                    f"{total_tokens/1e9:.2f}B tokens → {steps:,} steps"
+                )
 
     print(f"\nTokenizers ({len(tokenizers)}):")
     for tok in tokenizers:

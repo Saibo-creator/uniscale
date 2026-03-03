@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 import torch
-from datasets import load_dataset
+from datasets import load_dataset, interleave_datasets
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -103,6 +103,103 @@ def prepare_dataset(
     return tokenized_dataset
 
 
+def prepare_dataset_parquet(
+    data_dir: str,
+    tokenizer,
+    max_length: int = 2048,
+    eval_docs: int = 0,
+):
+    """
+    Prepare a lazy streaming dataset for training from a directory of parquet files.
+
+    Scans `data_dir` for sub-directories containing parquet files, interleaves
+    them, and yields tokenized chunks of exactly `max_length` tokens.  Long
+    documents are split into as many full-length chunks as possible; the
+    trailing remainder (< max_length tokens) is dropped so every sample in the
+    returned dataset has the same length.
+
+    Args:
+        data_dir: Root directory whose immediate sub-directories each contain
+                  one or more ``*.parquet`` files.
+        tokenizer: Tokenizer to use.
+        max_length: Number of tokens per training sample.
+        eval_docs: Number of raw documents to hold out as the eval split.
+                   The first ``eval_docs`` documents (after interleaving) go to
+                   eval; the rest go to train.  Pass 0 to skip the eval split.
+
+    Returns:
+        Tuple ``(train_ds, eval_ds)`` of ``IterableDataset`` objects.
+        ``eval_ds`` is ``None`` when ``eval_docs=0``.
+        NOTE: streaming datasets have no ``len()``.  The Trainer must be
+        configured with ``max_steps`` rather than ``num_train_epochs``.
+    """
+    base_path = Path(data_dir)
+
+    all_streaming_datasets = []
+    for folder in sorted(base_path.iterdir()):
+        if not folder.is_dir():
+            continue
+        if not list(folder.glob("**/*.parquet")):
+            continue
+        try:
+            ds = load_dataset(
+                "parquet",
+                data_files=str(folder / "**/*.parquet"),
+                split="train",
+                streaming=True,
+            )
+            # Normalise to a single "text" column regardless of source schema
+            src_columns = list(ds.features.keys())
+
+            def _unify(example, _cols=src_columns):  # default arg captures value, not name
+                text = ""
+                for key in ("text", "content"):
+                    if key in _cols and example.get(key):
+                        text = str(example[key])
+                        break
+                return {"text": text}
+
+            ds = ds.map(_unify, remove_columns=src_columns)
+            all_streaming_datasets.append(ds)
+            print(f"Loaded parquet dir: {folder.name}")
+        except Exception as exc:
+            print(f"Skipping {folder.name}: {exc}")
+
+    if not all_streaming_datasets:
+        raise ValueError(f"No parquet datasets found under {data_dir}")
+
+    combined = interleave_datasets(all_streaming_datasets)
+
+    def _tokenize_and_chunk(examples):
+        # Tokenise full texts without any truncation
+        token_lists = tokenizer(
+            examples["text"],
+            truncation=False,
+            padding=False,
+            return_attention_mask=False,
+        )["input_ids"]
+
+        # Split each document into non-overlapping max_length chunks;
+        # drop the trailing incomplete chunk so every sample is full-length.
+        chunks = []
+        for ids in token_lists:
+            for start in range(0, len(ids) - max_length + 1, max_length):
+                chunks.append(ids[start : start + max_length])
+        return {"input_ids": chunks}
+
+    def _to_tokenized(raw_ds):
+        return raw_ds.map(_tokenize_and_chunk, batched=True, remove_columns=["text"])
+
+    if eval_docs > 0:
+        eval_ds = _to_tokenized(combined.take(eval_docs))
+        train_ds = _to_tokenized(combined.skip(eval_docs))
+    else:
+        train_ds = _to_tokenized(combined)
+        eval_ds = None
+
+    return train_ds, eval_ds
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train language model with HF Trainer")
 
@@ -111,7 +208,7 @@ def main():
         "--model_size",
         type=str,
         required=True,
-        choices=["50M", "100M", "300M", "1B", "3B"],
+        choices=["30M", "100M", "300M", "1B", "3B", "8B"],
         help="Model size",
     )
     parser.add_argument(
@@ -123,28 +220,27 @@ def main():
 
     # Data arguments
     parser.add_argument(
-        "--train_file",
+        "--train_dir",
         type=str,
-        default="data/raw/train_data.jsonl",
-        help="Training data file (JSONL)",
+        default="data/tokenizer_training_dataset",
+        help="Root directory of parquet sub-directories for training",
     )
     parser.add_argument(
-        "--eval_file",
-        type=str,
-        default=None,
-        help="Evaluation data file (JSONL)",
+        "--eval_docs",
+        type=int,
+        default=3000,
+        help=(
+            "Number of raw documents to hold out as eval split "
+            "(first N docs from the interleaved stream; 0 = no eval). "
+            "After chunking, expect roughly 40-60%% of these docs to yield "
+            "usable samples, so 3000 docs ≈ 1200-1800 eval chunks."
+        ),
     )
     parser.add_argument(
         "--max_length",
         type=int,
         default=2048,
         help="Maximum sequence length",
-    )
-    parser.add_argument(
-        "--num_proc",
-        type=int,
-        default=None,
-        help="Number of CPU processes for tokenization (default: auto-detect 80%% of cores)",
     )
 
     # Training arguments
@@ -337,64 +433,24 @@ def main():
             print("Will use FP32 full precision training")
 
     if "RANK" in os.environ:
-        # local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        # # 必须在 init_process_group 之前设置
-        # torch.cuda.set_device(local_rank)
-        torch.distributed.init_process_group(backend="nccl") # 或者 "gloo"
+        torch.distributed.init_process_group(backend="nccl")
 
-    # Prepare dataset - ONLY on main process to avoid conflicts
-    # Other processes will load from cache (shared via HF_DATASETS_CACHE env var)
+    # Streaming datasets read directly from parquet — no disk cache is written,
+    # so every DDP rank builds its own stream independently (no barrier needed).
     if is_main_process:
-        print(f"Preparing training dataset... from {args.train_file}", flush=True)
-        # check if the training file exists before trying to prepare the dataset
-        if not os.path.isfile(args.train_file):
-            raise FileNotFoundError(f"Training file not found: {args.train_file}")
-        train_dataset = prepare_dataset(
-            args.train_file,
-            tokenizer,
-            max_length=args.max_length,
-            num_proc=args.num_proc,
-        )
-        print(f"Training dataset: {len(train_dataset)} examples")
+        print(f"Preparing streaming dataset from {args.train_dir} ...", flush=True)
+        if not os.path.isdir(args.train_dir):
+            raise FileNotFoundError(f"Training directory not found: {args.train_dir}")
 
-        eval_dataset = None
-        if args.eval_file:
-            print("Preparing evaluation dataset...")
-            eval_dataset = prepare_dataset(
-                args.eval_file,
-                tokenizer,
-                max_length=args.max_length,
-                num_proc=args.num_proc,
-            )
-            print(f"Evaluation dataset: {len(eval_dataset)} examples")
+    train_dataset, eval_dataset = prepare_dataset_parquet(
+        args.train_dir,
+        tokenizer,
+        max_length=args.max_length,
+        eval_docs=args.eval_docs,
+    )
 
-    # Wait for main process to finish preparing datasets and writing cache
-    if torch.distributed.is_available() and torch.distributed.is_initialized():
-        print(f"[Rank {local_rank}] Waiting at barrier for main process to finish dataset preparation...", flush=True)
-        torch.distributed.barrier()
-        print(f"[Rank {local_rank}] Barrier passed, loading datasets from cache...", flush=True)
-
-    # Non-main processes load the cached datasets
-    if not is_main_process:
-        print(f"[Rank {local_rank}] Loading training dataset from cache (should be instant)...", flush=True)
-        train_dataset = prepare_dataset(
-            args.train_file,
-            tokenizer,
-            max_length=args.max_length,
-            num_proc=1,  # Use single process to load from cache
-        )
-        print(f"[Rank {local_rank}] Training dataset loaded: {len(train_dataset)} examples", flush=True)
-
-        eval_dataset = None
-        if args.eval_file:
-            print(f"[Rank {local_rank}] Loading evaluation dataset from cache...", flush=True)
-            eval_dataset = prepare_dataset(
-                args.eval_file,
-                tokenizer,
-                max_length=args.max_length,
-                num_proc=1,
-            )
-            print(f"[Rank {local_rank}] Evaluation dataset loaded: {len(eval_dataset)} examples", flush=True)
+    if is_main_process:
+        print(f"Streaming dataset ready (eval_docs={args.eval_docs})", flush=True)
 
     # Data collator
     data_collator = DataCollatorForLanguageModeling(
@@ -415,7 +471,7 @@ def main():
         "save_total_limit": 3,
         "bf16": args.bf16,
         "fp16": args.fp16,
-        "dataloader_num_workers": 4,
+        "dataloader_num_workers": 1,  # streaming IterableDataset: num_workers capped at num_shards anyway
         "remove_unused_columns": False,
         "report_to": "wandb",
         "run_name": args.run_name,
