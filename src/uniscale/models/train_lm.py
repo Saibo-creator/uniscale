@@ -332,6 +332,11 @@ def main():
         default=None,
         help="W&B run name",
     )
+    parser.add_argument(
+        "--torch_compile",
+        action="store_true",
+        help="Compile model with torch.compile (inductor backend). ~10-30%% speedup after warmup.",
+    )
 
     args = parser.parse_args()
 
@@ -420,7 +425,17 @@ def main():
         dtype = torch.float16
     else:
         dtype = torch.float32
-    model = AutoModelForCausalLM.from_config(config, torch_dtype=dtype)
+    # Flash Attention 2: ~20-40% faster attention for long sequences, lower memory.
+    # Requires: pip install flash-attn --no-build-isolation
+    # Falls back to standard attention if flash-attn is not installed.
+    try:
+        import flash_attn  # noqa: F401
+        attn_impl = "flash_attention_2"
+    except ImportError:
+        attn_impl = "eager"
+        if is_main_process:
+            print("flash-attn not found, using standard attention. Install with: pip install flash-attn --no-build-isolation")
+    model = AutoModelForCausalLM.from_config(config, torch_dtype=dtype, attn_implementation=attn_impl)
     if is_main_process:
         print(f"Model initialized with {model.num_parameters():,} parameters (dtype: {model.dtype})")
 
@@ -431,6 +446,10 @@ def main():
             print("Will use BF16 automatic mixed precision training")
         else:
             print("Will use FP32 full precision training")
+
+    # Allow TF32 on Ampere+ GPUs (safe: same dynamic range as FP32, ~2x matmul throughput)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
     if "RANK" in os.environ:
         torch.distributed.init_process_group(backend="nccl")
@@ -476,6 +495,10 @@ def main():
         "report_to": "wandb",
         "run_name": args.run_name,
         "seed": args.seed,
+        # Efficiency improvements
+        "optim": "adamw_torch_fused",          # fused CUDA kernel: ~5-10% faster optimizer step
+        "ddp_find_unused_parameters": False,   # Apertus has no unused params; skip the check
+        "torch_compile": args.torch_compile,   # opt-in; ~10-30% throughput after JIT warmup
     }
 
     # Add either max_steps or num_train_epochs

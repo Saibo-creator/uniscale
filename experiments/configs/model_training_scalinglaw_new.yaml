@@ -1,14 +1,16 @@
 # Configuration for training language models with Scaling Law
 # Following Chinchilla scaling: 20 tokens per parameter
 
-# Data files (FineWeb 2 - LANG_SET_20)
-train_file: "data/raw/train_data.jsonl"  # 5.7GB FineWeb corpus
-eval_file: "data/raw/val_data.jsonl"     # 29MB validation set
+# Data source (parquet sub-directories)
+data_dir: "data/tokenizer_training_dataset"
+# First eval_docs documents from the interleaved stream are held out for eval.
+# After chunking (~40-60% yield), 3000 docs ≈ 1200-1800 eval samples.
+eval_docs: 3000
 
 # Model sizes to train
 # Start with smaller models for faster experimentation
 model_sizes:
-  - "50M"   # 50M params → 1B tokens
+  - "30M"   # 50M params → 1B tokens
   - "100M"  # 100M params → 2B tokens
   - "300M"  # 300M params → 6B tokens (uncomment when ready)
   # - "1B"    # 1B params → 20B tokens (uncomment when ready)
@@ -31,33 +33,26 @@ seeds:
 
 # Training hyperparameters
 training:
-  # Token-based training (NOT epoch-based)
-  # max_steps calculated as: (target_tokens) / (batch_size * grad_accum * num_gpus * max_length)
+  # Token-based training (NOT epoch-based), following Chinchilla scaling law.
   #
-  # With batch_size=8, grad_accum=4, num_gpus=4, max_length=2048:
-  #   - tokens_per_step = 8 * 4 * 4 * 2048 = 262,144 tokens (256K)
+  # max_steps is derived at runtime:
+  #   param_count  = estimate_parameters_for_size(model_size, tokenizer_vocab_size)
+  #   total_tokens = tokens_per_param × param_count
+  #   max_steps    = total_tokens / tokens_per_step
   #
-  # Model size → Target tokens → Max steps (4 GPUs):
-  #   50M  → 1B tokens  → 3,815 steps
-  #   100M → 2B tokens  → 7,630 steps
-  #   300M → 6B tokens  → 22,888 steps
-  #   1B   → 20B tokens → 76,294 steps
-  #
-  # Note: 256K tokens/step provides good training dynamics for scaling law studies
+  # tokens_per_step = per_device_batch × max_length × grad_accum × num_gpus
+  #   e.g. 8 × 2048 × 4 × 4 GPUs = 262,144 tokens/step (256K)
 
-  # The training script will automatically set max_steps based on model size
-  max_steps_per_model:
-    "50M": 3815      # 1B tokens / 262144 ≈ 3,815 steps (4 GPUs)
-    "100M": 7630     # 2B tokens / 262144 ≈ 7,630 steps (4 GPUs)
-    "300M": 22888    # 6B tokens / 262144 ≈ 22,888 steps (4 GPUs)
-    "1B": 76294      # 20B tokens / 262144 ≈ 76,294 steps (4 GPUs)
+  # Chinchilla ratio: train on this many tokens per model parameter.
+  tokens_per_param: 20
 
   # Batch configuration (optimized for 256K tokens/step with efficiency)
-  per_device_train_batch_size: 8   # 8 samples per GPU 
+  per_device_train_batch_size: 2   # 8 samples per GPU
   per_device_eval_batch_size: 16   # Can use larger batch for eval
-  gradient_accumulation_steps: 4   # Accumulate gradients over 4 steps (2x more efficient than 8)
-  # Effective batch per GPU: 8 * 4 = 32 sequences = 65,536 tokens
-  # Total effective batch (4 GPUs): 32 * 4 = 128 sequences = 262,144 tokens
+  tokens_per_step: 262144          # 256K tokens/step (primary knob)
+  # gradient_accumulation_steps is auto-derived at launch time:
+  #   grad_accum = tokens_per_step / (per_device_batch × max_length × num_gpus)
+  #   e.g. 262144 / (8 × 2048 × 4 GPUs) = 4
 
   # Optimization
   learning_rate: 5.0e-4
@@ -78,7 +73,7 @@ training:
 
   # Checkpointing
   save_strategy: "steps"
-  save_steps: 5000  # Save every 5k steps
+  save_steps: 100  # Save every 100 steps
   save_total_limit: 3  # Keep only last 3 checkpoints to save space
 
   # Evaluation
@@ -90,7 +85,7 @@ training:
   logging_first_step: true
 
   # Performance
-  dataloader_num_workers: 4
+  dataloader_num_workers: 1  # streaming IterableDataset: capped at num_shards anyway
   remove_unused_columns: false
 
 # Output directory structure

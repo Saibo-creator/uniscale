@@ -13,7 +13,6 @@ We define "follow the same patterns" as there being a high rank-correlation in t
 ```
 scale-invariant-tokenizer-pick/
 ├── data/                      # Data downloading and preprocessing
-│   ├── corpus_downloader.py  # FineWeb 2 data downloader
 │   └── raw/                  # Raw downloaded data
 ├── tokenizers/               # Tokenizer training
 │   ├── train_tokenizer.py   # Tokenizer training script
@@ -46,10 +45,11 @@ scale-invariant-tokenizer-pick/
 
 ### Language Models
 - **Architecture**: Apertus (scaled down from swiss-ai/Apertus-8B-2509)
-- **Model Sizes**: 50M, 100M, 300M, 1B params (3B if feasible)
+- **Model Sizes**: 30M, 100M, 300M, 1B params
+- **Token Budget**: Chinchilla scaling law — 20 tokens per parameter (derived at runtime from actual param count)
 - **Random Seeds**: 3 seeds per configuration
 - **Training Data**: LANG_SET_20 languages from FineWeb 2
-- **Training Framework**: Hugging Face Trainer
+- **Training Framework**: Hugging Face Trainer + torchrun (DDP)
 
 ### Evaluation
 - **Primary Metric**: Perplexity per byte
@@ -97,10 +97,13 @@ The entire experimental pipeline is managed through YAML configuration files. He
 
 ### 1. Download Data
 
+<details>
+<summary>Data from Corpus Downloader (old)</summary>
+
 Download training data from FineWeb 2 using the corpus downloader:
 
 ```bash
-python -m uniscale.data.corpus_downloader \
+python scripts/corpus_downloader.py \
   --dataset fineweb \
   --lang_set L20 \
   --total_size_gb 10 \
@@ -124,6 +127,32 @@ This will create:
 - `data/raw/val_data.jsonl` - Validation data
 - `data/raw/test_data.jsonl` - Test data
 
+</details>
+
+<details>
+<summary>Parquets Data on Clariden (new)</summary>
+
+Inspect and convert parquet files (e.g. from `data/tokenizer_training_dataset`) to JSONL.
+Language is taken from each parquet file's stem name. Outputs a 99/1 train/dev split.
+
+```bash
+# Inspect
+python scripts/process_parquets.py --input_dir data/tokenizer_training_dataset
+
+# Convert all data
+python scripts/process_parquets.py \
+    --input_dir data/tokenizer_training_dataset \
+    --output_dir out/all
+```
+
+This will create:
+- `out/all/train.jsonl` - Training data (~99%)
+- `out/all/dev.jsonl` - Dev data (~1%)
+- `out/all/dev.txt` - Dev data in .txt format (for SuperBPE)
+- `out/all/train.txt` - Train data in .txt format (for SuperBPE)
+
+</details>
+
 ### 2. Train Tokenizers
 
 Train all tokenizers based on the YAML configuration:
@@ -135,11 +164,13 @@ python scripts/train_all_tokenizers.py \
 
 Configuration file: [experiments/configs/tokenizer_training.yaml](experiments/configs/tokenizer_training.yaml)
 
-This will train:
-- BPE tokenizers with vocab sizes: 80k, 128k, 256k
-- UnigramLM tokenizers with vocab sizes: 80k, 128k, 256k
+For superbpe, use:
 
-Output: `tokenizers/trained/{algorithm}_v{size}k/`
+```bashpython scripts/train_all_tokenizers.py \
+  --config experiments/configs/tokenizer_training_superbpe.yaml
+```
+
+Output: `out/tokenizers`
 
 ### 3. Evaluate Tokenizers (Intrinsic Metrics)
 
@@ -176,62 +207,70 @@ Train all model size and tokenizer combinations:
 
 ```bash
 python scripts/train_all_models.py \
-  --config experiments/configs/model_training.yaml
+  --config experiments/configs/model_training_scalinglaw_new.yaml \
+  --num_gpus 4
 ```
 
-Configuration file: [experiments/configs/model_training.yaml](experiments/configs/model_training.yaml)
+Configuration file: [experiments/configs/model_training_scalinglaw_new.yaml](experiments/configs/model_training_scalinglaw_new.yaml)
 
-This will train models for:
-- Model sizes: 50M, 100M, 300M, 1B
-- All trained tokenizers (6 total)
-- 3 random seeds each
-- Total: 72 training runs (4 sizes × 6 tokenizers × 3 seeds)
+**Token budget (Chinchilla):** instead of hardcoding steps, the config specifies `tokens_per_param: 20`. At launch, the script calls `estimate_parameters_for_size(model_size, tokenizer_vocab_size)` to get the actual parameter count, then derives:
+```
+total_tokens = tokens_per_param × param_count
+max_steps    = total_tokens / tokens_per_step
+```
 
 **Training with multiple GPUs (DDP):**
 
 ```bash
-# Single GPU (default)
+# Single GPU
 python scripts/train_all_models.py \
-  --config experiments/configs/model_training.yaml \
+  --config experiments/configs/model_training_scalinglaw_new.yaml \
   --num_gpus 1
 
-# Multi-GPU with Distributed Data Parallel
+# Multi-GPU with Distributed Data Parallel (uses torchrun automatically)
 python scripts/train_all_models.py \
-  --config experiments/configs/model_training.yaml \
-  --num_gpus 2  # or 4, 8, etc.
+  --config experiments/configs/model_training_scalinglaw_new.yaml \
+  --num_gpus 4
+
+# With torch.compile for ~10-30% throughput gain (adds JIT warmup ~2 min)
+python scripts/train_all_models.py \
+  --config experiments/configs/model_training_scalinglaw_new.yaml \
+  --num_gpus 4 \
+  --torch_compile
 ```
 
 **Note on DDP training:**
 - The script automatically uses `torchrun` when `--num_gpus > 1`
-- Only the main process (rank 0) logs to wandb and saves checkpoints
-- Dataset preparation is done once by the main process, then shared via cache
-- If you encounter NCCL shared memory errors in containers, clean up `/dev/shm/nccl-*` files or set `NCCL_SHM_DISABLE=1`
+- Must be launched via `train_all_models.py` (or `torchrun` directly) — running `train_lm.py` with plain `python` and multiple visible GPUs will trigger `DataParallel` instead, which may cause NCCL errors
+- If you encounter NCCL errors, try `NCCL_P2P_DISABLE=1` as a workaround
 
 **Training a specific combination:**
 
 ```bash
-# Train only 50M models
-python scripts/train_all_models.py --model_size 50M
+# Train only 30M models
+python scripts/train_all_models.py \
+  --config experiments/configs/model_training_scalinglaw_new.yaml \
+  --model_size 30M --num_gpus 2
 
 # Train only with a specific tokenizer
-python scripts/train_all_models.py --tokenizer tokenizers/trained/bpe_v80k
+python scripts/train_all_models.py \
+  --config experiments/configs/model_training_scalinglaw_new.yaml \
+  --tokenizer out/tokenizers/bpe_apertus_128k
 
-# Train with specific seed
-python scripts/train_all_models.py --seed 42
+# Train with a specific seed
+python scripts/train_all_models.py \
+  --config experiments/configs/model_training_scalinglaw_new.yaml \
+  --seed 42
 
-# Combine with multi-GPU
-python scripts/train_all_models.py --model_size 50M --num_gpus 2
-
-# Customize output directory
-python scripts/train_all_models.py --output_dir experiments/run1
-
-# Dry run to see what will be trained
-python scripts/train_all_models.py --dry_run
+# Dry run to preview commands and step counts
+python scripts/train_all_models.py \
+  --config experiments/configs/model_training_scalinglaw_new.yaml \
+  --dry_run --num_gpus 4
 ```
 
 **Default output structure:**
 - Models are saved to `out/models/{model_size}_{tokenizer}_{seed}/`
-- Use `--output_dir` to change the base directory (e.g., `--output_dir experiments/run1`)
+- Use `--output_dir` to change the base directory
 
 ### 5. Evaluate Models
 
@@ -294,22 +333,23 @@ python -m uniscale.tokenizers.train_tokenizer \
 ```bash
 # Single GPU
 python src/uniscale/models/train_lm.py \
-  --model_size 50M \
-  --tokenizer_path out/tokenizers/bpe_v80k \
-  --train_file data/raw/train_data.jsonl \
-  --eval_file data/raw/val_data.jsonl \
+  --model_size 30M \
+  --tokenizer_path out/tokenizers/bpe_apertus_128k \
+  --train_dir data/tokenizer_training_dataset \
+  --max_steps 5000 \
   --seed 42 \
   --bf16
 
-# Multi-GPU with DDP (use torchrun)
-torchrun --nproc_per_node=2 \
+# Multi-GPU with DDP (must use torchrun)
+torchrun --nproc_per_node=4 \
   src/uniscale/models/train_lm.py \
-  --model_size 50M \
-  --tokenizer_path out/tokenizers/bpe_v80k \
-  --train_file data/raw/train_data.jsonl \
-  --eval_file data/raw/val_data.jsonl \
+  --model_size 30M \
+  --tokenizer_path out/tokenizers/bpe_apertus_128k \
+  --train_dir data/tokenizer_training_dataset \
+  --max_steps 5000 \
   --seed 42 \
-  --bf16
+  --bf16 \
+  --torch_compile
 ```
 
 **Evaluate a single model:**
@@ -333,11 +373,13 @@ Edit [experiments/configs/tokenizer_training.yaml](experiments/configs/tokenizer
 
 ### Model Training Configuration
 
-Edit [experiments/configs/model_training.yaml](experiments/configs/model_training.yaml) to customize:
-- Model sizes
-- Tokenizers to use
-- Random seeds
-- Training hyperparameters (learning rate, batch size, etc.)
+Edit [experiments/configs/model_training_scalinglaw_new.yaml](experiments/configs/model_training_scalinglaw_new.yaml) to customize:
+- `model_sizes`: which sizes to train (`30M`, `100M`, `300M`, `1B`)
+- `tokenizers`: list of tokenizer paths
+- `seeds`: random seeds for statistical significance
+- `tokens_per_param`: Chinchilla ratio (default `20`); `max_steps` is auto-derived at runtime
+- `tokens_per_step`: global batch size in tokens (controls `gradient_accumulation_steps`)
+- Other hyperparameters (learning rate, warmup, etc.)
 - Weights & Biases integration
 
 ## Expected Results
@@ -361,8 +403,6 @@ scale-invariant-tokenizer-pick/
 │   └── uniscale/                     # Main Python package
 │       ├── __init__.py
 │       ├── data/
-│       │   ├── __init__.py
-│       │   ├── corpus_downloader.py  # FineWeb 2 data downloader
 │       │   └── __init__.py
 │       ├── tokenizers/
 │       │   ├── __init__.py
@@ -381,6 +421,7 @@ scale-invariant-tokenizer-pick/
 │           ├── __init__.py
 │           └── correlation_analysis.py # Rank correlation analysis
 ├── scripts/
+│   ├── corpus_downloader.py      # FineWeb 2 data downloader
 │   ├── train_all_tokenizers.py   # Batch tokenizer training
 │   ├── train_all_models.py       # Batch model training
 │   └── evaluate_all_models.py    # Batch evaluation

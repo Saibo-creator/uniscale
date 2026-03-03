@@ -123,6 +123,7 @@ def train_model(
     config: ModelTrainingConfig,
     num_gpus: int = 1,
     output_base_dir: str = "out/models",
+    torch_compile: bool = False,
 ) -> bool:
     """
     Train a single model.
@@ -228,6 +229,10 @@ def train_model(
     if config.training.fp16:
         cmd.append("--fp16")
 
+    # Optional efficiency flags
+    if torch_compile:
+        cmd.append("--torch_compile")
+
     # Run training
     print(f"\n[COMMAND] {' '.join(cmd)}\n")
 
@@ -286,6 +291,11 @@ def main():
         type=str,
         default="out/models",
         help="Base output directory for model checkpoints (default: out/models)",
+    )
+    parser.add_argument(
+        "--torch_compile",
+        action="store_true",
+        help="Pass --torch_compile to train_lm.py (torch.compile inductor, ~10-30%% speedup after warmup)",
     )
 
     args = parser.parse_args()
@@ -380,6 +390,7 @@ def main():
                     seed,
                     config,
                     num_gpus=args.num_gpus,
+                    torch_compile=args.torch_compile,
                     output_base_dir=args.output_dir,
                 )
 
