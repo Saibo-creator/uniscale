@@ -1,0 +1,108 @@
+# Configuration for training tokenizers using the beta unified backend interface
+#
+# This configuration supports multiple tokenizer backends:
+# - HuggingFace (bpe, unigram, wordpiece)
+#   * pre_tokenizer options:
+#     - "byte_level" (default): Simple byte-level encoding
+#     - "apertus": Apertus-style regex split + byte-level
+#     - "gpt2": GPT-2 style (handles contractions: 's, 't, etc.)
+#     - "gpt4": GPT-4 style (improved handling, limits numbers to 1-3 digits)
+#     - "whitespace": Simple whitespace splitting
+# - SentencePiece (bpe, unigram, char, word)
+# - Parity-aware BPE (pa-bpe, pa-super-bpe)
+# - TkTkT (picky, kudopiece, ngram, bpe-dropout, etc.)
+# - SuperBPE (superbpe) — two-phase training via dedicated venv (venv/superbpe_venv)
+#   * pre_tokenizer: Phase 1 base BPE regex ("gpt4", "apertus", "gpt2", or raw regex)
+#   * pre_tokenizer_phase2: Phase 2 extension regex (default: "superbpe")
+#   * phase1_merges: merges inherited from Phase 1 (default: 60% of vocab_size)
+#   * corpus_dir: directory of .txt files (required; replaces data_file)
+#   * num_bytes: bytes of training data (default: 1 GB)
+#   * export_hf: must be false (HF export not supported)
+#
+# Note: Vocabulary sizes will be automatically aligned to the nearest
+# multiple of 256 for CUDA efficiency (5-15% performance improvement).
+
+data_file: "data/tokenizer_training_data_processed/dev.jsonl"
+
+# Global default settings (can be overridden per tokenizer)
+defaults:
+  min_frequency: 2
+  character_coverage: 1.0
+  num_workers: 1
+  export_hf: true
+  pre_tokenizer: "apertus"  # Use Apertus pretokenizer by default for all HuggingFace tokenizers
+
+tokenizers:
+  # ============================================================================
+  # HuggingFace Backend Tokenizers
+  # ============================================================================
+
+  # Standard ByteLevel BPE
+  - algorithm: "bpe"
+    backend: "huggingface"
+    vocab_size: 128000
+    min_frequency: 2
+    pre_tokenizer: "byte_level"  # Default: simple byte-level
+    name: "bpe_byte_level_128k"
+
+  # Apertus style BPE (regex split + byte-level)
+  - algorithm: "bpe"
+    backend: "huggingface"
+    vocab_size: 128000
+    min_frequency: 2
+    pre_tokenizer: "apertus"  # Apertus-style pretokenization
+    name: "bpe_apertus_128k"
+
+
+  # GPT-2 style BPE
+  - algorithm: "bpe"
+    backend: "huggingface"
+    vocab_size: 128000
+    min_frequency: 2
+    pre_tokenizer: "gpt2"  # GPT-2 style (handles contractions)
+    name: "bpe_gpt2_128k"
+
+  # ============================================================================
+  # Unigram Tokenizers (using HuggingFace backend with different pretokenizers)
+  # ============================================================================
+
+  # ByteLevel Unigram
+  - algorithm: "unigram"
+    backend: "huggingface"
+    vocab_size: 128000
+    pre_tokenizer: "byte_level"
+    name: "unigram_byte_level_128k"
+
+  # # Apertus Unigram
+  # - algorithm: "unigram"
+  #   backend: "huggingface"
+  #   vocab_size: 128000
+  #   pre_tokenizer: "apertus"
+  #   name: "unigram_apertus_128k"
+
+  # # GPT-2 Unigram
+  # - algorithm: "unigram"
+  #   backend: "huggingface"
+  #   vocab_size: 128000
+  #   pre_tokenizer: "gpt2"
+  #   name: "unigram_gpt2_128k"
+
+  # # ============================================================================
+  # # Parity-Aware BPE Backend Tokenizers
+  # # ============================================================================
+
+  # # Standard parity-aware BPE
+  # - algorithm: "pa-bpe"
+  #   backend: "parity-aware-bpe"
+  #   vocab_size: 128000
+  #   # Optional: specify dev_file for language-specific parity
+  #   # dev_file: "data/raw/multilingual_dev.jsonl"
+  #   # ratio: [1.0, 1.0, 1.0]  # Target compression ratios per language
+
+  # # Parity-aware super-BPE (two-phase training)
+  # - algorithm: "pa-super-bpe"
+  #   backend: "parity-aware-bpe"
+  #   vocab_size: 128000
+  #   phase1_merges: 96000  # 60% of vocab_size for phase 1
+  #   # dev_file: "data/raw/multilingual_dev.jsonl"
+  #   # ratio: [1.0, 1.0, 1.0]

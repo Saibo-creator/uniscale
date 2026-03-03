@@ -1,0 +1,29 @@
+# Configuration for training SuperBPE tokenizers.
+#
+# SuperBPE backend parameters:
+#   corpus_dir:           directory of .txt files (optional; if omitted, data_file must be a .txt)
+#   num_bytes:            bytes of training data to consume
+#   pre_tokenizer:        Phase 1 base BPE regex preset ("gpt4", "apertus", "gpt2", or raw regex)
+#   pre_tokenizer_phase2: Phase 2 extension regex preset (default: "superbpe")
+#   phase1_merges:        merges inherited from Phase 1 into Phase 2 (default: 60% of vocab_size)
+#   export_hf:            must be false (HF export not supported by this backend)
+#
+# Training runs python -m train_tokenizer inside tmp/superbpe/ using venv/superbpe_venv.
+
+data_file: "/home/saibo/Projects/scale-invariant-tokenizer-pick/data/tokenizer_training_data_processed/dev.txt"  # unused by superbpe, kept for compatibility
+
+defaults:
+  export_hf: true
+  num_bytes: 1000000000  # 1 GB
+  superbpe_venv: "/home/saibo/Projects/scale-invariant-tokenizer-pick/venv/superbpe_venv"  # path to superbpe's dedicated venv
+  superbpe_dir: "/home/saibo/Projects/scale-invariant-tokenizer-pick/tmp/superbpe"         # path to superbpe source (contains train_tokenizer.py)
+
+tokenizers:
+  # GPT-4 style SuperBPE (English only)
+  - algorithm: "superbpe"
+    backend: "superbpe"
+    vocab_size: 128000
+    pre_tokenizer: "apertus"              # Phase 1: broad regex (base BPE)
+    pre_tokenizer_phase2: "apertus-phase2" # Phase 2: narrow regex (numbers + punctuation)
+    phase1_merges: 100000                  # ~78% of vocab_size
+    name: "superbpe_apertus_128k"

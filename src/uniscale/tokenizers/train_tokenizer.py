@@ -1,320 +1,329 @@
 """
-Train tokenizers (BPE, UnigramLM) with different vocabulary sizes.
+Train tokenizers with different backends and algorithms.
 
-This script ensures consistent pretokenization across all tokenizer types
-for fair comparison.
+This script provides a unified interface for training tokenizers using different
+backend libraries (HuggingFace, SentencePiece, parity-aware-bpe, TkTkT).
+All tokenizers are exported to HuggingFace format for consistent usage.
 """
 
 import argparse
-import json
-from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import Dict, List
 
-from tokenizers import (
-    Tokenizer,
-    models,
-    normalizers,
-    pre_tokenizers,
-    trainers,
-    processors,
+from uniscale.tokenizers.backends import (
+    TokenizerBackend,
+    HuggingFaceBackend,
+    SentencePieceBackend,
+    ParityAwareBPEBackend,
+    TkTkTBackend,
+    SuperBPEBackend,
 )
-from tqdm import tqdm
-import sentencepiece as spm
 
 
-def align_vocab_size_to_256(vocab_size: int) -> int:
+# Registry of available backends
+BACKEND_REGISTRY: Dict[str, TokenizerBackend] = {
+    "huggingface": HuggingFaceBackend(),
+    "sentencepiece": SentencePieceBackend(),
+    "parity-aware-bpe": ParityAwareBPEBackend(),
+    "tktkt": TkTkTBackend(),
+    "superbpe": SuperBPEBackend(),
+}
+
+
+def get_available_algorithms() -> Dict[str, list]:
+    """Get all available algorithms grouped by backend."""
+    return {
+        backend_name: backend.get_supported_algorithms()
+        for backend_name, backend in BACKEND_REGISTRY.items()
+    }
+
+
+def find_backend_for_algorithm(algorithm: str) -> tuple[str, TokenizerBackend]:
     """
-    Align vocabulary size to the nearest multiple of 256 for CUDA efficiency.
-
-    CUDA operations are optimized for memory aligned to 256 bytes.
-    Aligning vocab size to 256 multiples can provide 5-15% performance improvement.
+    Find the backend that supports the given algorithm.
 
     Args:
-        vocab_size: Original vocabulary size
+        algorithm: The tokenization algorithm
 
     Returns:
-        Aligned vocabulary size (nearest multiple of 256)
-    """
-    remainder = vocab_size % 256
-    if remainder == 0:
-        return vocab_size
+        Tuple of (backend_name, backend_instance)
 
-    # Round to nearest (round up if exactly at midpoint or beyond)
-    if remainder < 128:
-        # Round down
-        aligned = vocab_size - remainder
+    Raises:
+        ValueError: If no backend supports the algorithm
+    """
+    for backend_name, backend in BACKEND_REGISTRY.items():
+        if algorithm in backend.get_supported_algorithms():
+            return backend_name, backend
+
+    # If not found, show available algorithms
+    available = get_available_algorithms()
+    available_str = "\n".join(
+        f"  {backend}: {', '.join(algos)}"
+        for backend, algos in available.items()
+    )
+    raise ValueError(
+        f"Algorithm '{algorithm}' not supported by any backend.\n"
+        f"Available algorithms:\n{available_str}"
+    )
+
+
+def train_tokenizer(
+    algorithm: str,
+    data_file: str,
+    vocab_size: int,
+    output_dir: str = None,
+    backend: str = None,
+    export_hf: bool = True,
+    **kwargs
+) -> str:
+    """
+    Train a tokenizer using the specified algorithm.
+
+    Args:
+        algorithm: Tokenization algorithm to use
+        data_file: Path to training data (JSONL format)
+        vocab_size: Target vocabulary size
+        output_dir: Output directory (auto-generated if None)
+        backend: Backend to use (auto-detected if None)
+        export_hf: Whether to export to HuggingFace format
+        **kwargs: Additional algorithm-specific parameters
+
+    Returns:
+        Path to the output directory
+    """
+    # Auto-detect backend if not specified
+    if backend is None:
+        backend_name, backend_instance = find_backend_for_algorithm(algorithm)
+        print(f"Auto-detected backend: {backend_name}")
     else:
-        # Round up (including remainder == 128)
-        aligned = vocab_size + (256 - remainder)
+        if backend not in BACKEND_REGISTRY:
+            raise ValueError(
+                f"Backend '{backend}' not found. "
+                f"Available backends: {list(BACKEND_REGISTRY.keys())}"
+            )
+        backend_instance = BACKEND_REGISTRY[backend]
+        backend_name = backend
 
-    return aligned
+        # Verify algorithm is supported
+        if algorithm not in backend_instance.get_supported_algorithms():
+            raise ValueError(
+                f"Algorithm '{algorithm}' not supported by backend '{backend}'. "
+                f"Supported algorithms: {backend_instance.get_supported_algorithms()}"
+            )
 
+    # Determine output directory
+    if output_dir is None:
+        vocab_size_k = vocab_size // 1000
+        output_dir = f"out/tokenizers/{algorithm}_v{vocab_size_k}k"
 
-def get_text_iterator(data_file: str, batch_size: int = 1000) -> Iterator[List[str]]:
-    """
-    Iterator to yield batches of text from JSONL file.
+    print(f"\n{'='*60}")
+    print(f"Training Tokenizer")
+    print(f"{'='*60}")
+    print(f"Backend: {backend_name}")
+    print(f"Algorithm: {algorithm}")
+    print(f"Vocabulary size: {vocab_size:,}")
+    print(f"Data file: {data_file}")
+    print(f"Output directory: {output_dir}")
+    print(f"{'='*60}\n")
 
-    Args:
-        data_file: Path to JSONL file with 'text' field
-        batch_size: Number of texts per batch
-
-    Yields:
-        Batches of text strings
-    """
-    batch = []
-    with open(data_file, "r", encoding="utf-8") as f:
-        for line in f:
-            data = json.loads(line)
-            text = data.get("text", "")
-            if text:
-                batch.append(text)
-                if len(batch) >= batch_size:
-                    yield batch
-                    batch = []
-
-    if batch:
-        yield batch
-
-
-def train_bpe_tokenizer(
-    data_file: str,
-    vocab_size: int,
-    output_dir: str,
-    min_frequency: int = 2,
-) -> None:
-    """
-    Train a Byte-Level BPE tokenizer.
-
-    Args:
-        data_file: Path to training data (JSONL)
-        vocab_size: Size of vocabulary (will be aligned to nearest 256 multiple)
-        output_dir: Directory to save trained tokenizer
-        min_frequency: Minimum frequency for tokens
-    """
-    # Align vocab size to 256 for CUDA efficiency
-    original_vocab_size = vocab_size
-    vocab_size = align_vocab_size_to_256(vocab_size)
-
-    if vocab_size != original_vocab_size:
-        print(f"Aligning vocab size: {original_vocab_size:,} → {vocab_size:,} (nearest 256 multiple)")
-
-    print(f"Training BPE tokenizer with vocab_size={vocab_size:,}")
-
-    # Initialize tokenizer with ByteLevel BPE
-    tokenizer = Tokenizer(models.BPE())
-
-    # Use consistent pretokenization: ByteLevel
-    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
-
-    # Normalization (minimal for byte-level)
-    tokenizer.normalizer = normalizers.Sequence([])
-
-    # Post-processing
-    tokenizer.post_processor = processors.ByteLevel(trim_offsets=False)
-
-    # Trainer
-    trainer = trainers.BpeTrainer(
+    # Train tokenizer
+    artifacts_dir = output_dir
+    _ = backend_instance.train(
+        algorithm=algorithm,
+        data_file=data_file,
         vocab_size=vocab_size,
-        min_frequency=min_frequency,
-        special_tokens=["<pad>", "<s>", "</s>", "<unk>", "<mask>"],
-        show_progress=True,
+        output_dir=artifacts_dir,
+        **kwargs
     )
 
-    # Train on iterator
-    print("Reading training data...")
-    tokenizer.train_from_iterator(
-        get_text_iterator(data_file),
-        trainer=trainer,
-        length=None,  # Will show progress without knowing total
-    )
+    print(f"\n✓ Training completed!")
+    print(f"  Artifacts saved to: {artifacts_dir}")
 
-    # Save
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    tokenizer.save(str(output_path / "tokenizer.json"))
+    # Export to HuggingFace format
+    if export_hf:
+        hf_dir = f"{output_dir}/hf"
+        print(f"\nExporting to HuggingFace format...")
+        _ = backend_instance.export_to_hf(
+            artifacts_dir=artifacts_dir,
+            output_dir=hf_dir,
+        )
+        print(f"✓ HuggingFace tokenizer saved to: {hf_dir}")
+        print(f"  Load with: AutoTokenizer.from_pretrained('{hf_dir}')")
 
-    print(f"✓ Saved BPE tokenizer to {output_path}")
+    print(f"\n{'='*60}")
+    print(f"✓ Tokenizer training completed successfully!")
+    print(f"{'='*60}\n")
 
-    # Save config
-    config = {
-        "tokenizer_type": "BPE",
-        "vocab_size": vocab_size,
-        "min_frequency": min_frequency,
-    }
-    with open(output_path / "config.json", "w") as f:
-        json.dump(config, f, indent=2)
-
-
-def train_unigram_tokenizer(
-    data_file: str,
-    vocab_size: int,
-    output_dir: str,
-) -> None:
-    """
-    Train a UnigramLM tokenizer using SentencePiece.
-
-    Args:
-        data_file: Path to training data (JSONL)
-        vocab_size: Size of vocabulary (will be aligned to nearest 256 multiple)
-        output_dir: Directory to save trained tokenizer
-    """
-    # Align vocab size to 256 for CUDA efficiency
-    original_vocab_size = vocab_size
-    vocab_size = align_vocab_size_to_256(vocab_size)
-
-    if vocab_size != original_vocab_size:
-        print(f"Aligning vocab size: {original_vocab_size:,} → {vocab_size:,} (nearest 256 multiple)")
-
-    print(f"Training UnigramLM tokenizer with vocab_size={vocab_size:,}")
-
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    # Extract text to temporary file for SentencePiece
-    temp_text_file = output_path / "temp_training_data.txt"
-    print("Extracting text for SentencePiece training...")
-
-    with open(temp_text_file, "w", encoding="utf-8") as out_f:
-        with open(data_file, "r", encoding="utf-8") as in_f:
-            for line in tqdm(in_f, desc="Extracting text"):
-                data = json.loads(line)
-                text = data.get("text", "").strip()
-                if text:
-                    out_f.write(text + "\n")
-
-    # Train SentencePiece model
-    # Use 'tokenizer' as prefix so it creates 'tokenizer.model' (HF compatible name)
-    model_prefix = str(output_path / "tokenizer")
-
-    spm.SentencePieceTrainer.train(
-        input=str(temp_text_file),
-        model_prefix=model_prefix,
-        vocab_size=vocab_size,
-        model_type="unigram",
-        character_coverage=1.0,  # For byte-level
-        byte_fallback=True,  # Byte-level fallback
-        split_digits=True,
-        split_by_unicode_script=False,
-        normalization_rule_name="identity",  # No normalization for consistency
-        add_dummy_prefix=False,  # No prefix space
-        user_defined_symbols=["<mask>"],  # Only custom tokens, control tokens defined via *_id
-        pad_id=0,
-        bos_id=1,
-        eos_id=2,
-        unk_id=3,
-    )
-
-    # Clean up temp file
-    temp_text_file.unlink()
-
-    print(f"✓ Saved SentencePiece model to {output_path}")
-    print(f"  - tokenizer.model (HF-compatible name)")
-    print(f"  - tokenizer.vocab")
-
-    # Create HuggingFace-compatible tokenizer_config.json
-    # This allows AutoTokenizer to automatically load the SentencePiece model
-    print("Creating HuggingFace-compatible configuration...")
-
-    tokenizer_config = {
-        "add_bos_token": False,
-        "add_eos_token": False,
-        "bos_token": "<s>",
-        "eos_token": "</s>",
-        "pad_token": "<pad>",
-        "unk_token": "<unk>",
-        "mask_token": "<mask>",
-        "model_max_length": 2048,
-        "padding_side": "right",
-        "truncation_side": "right",
-        "tokenizer_class": "LlamaTokenizer",  # Use Llama tokenizer class for SPM
-        "vocab_size": vocab_size,
-    }
-
-    with open(output_path / "tokenizer_config.json", "w") as f:
-        json.dump(tokenizer_config, f, indent=2)
-
-    # Also save our custom config
-    config = {
-        "tokenizer_type": "UnigramLM",
-        "vocab_size": vocab_size,
-        "backend": "sentencepiece",
-    }
-    with open(output_path / "config.json", "w") as f:
-        json.dump(config, f, indent=2)
-
-    print(f"✓ Created HuggingFace-compatible config")
-    print(f"  Can now load with: AutoTokenizer.from_pretrained('{output_path}')")
+    return output_dir
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train tokenizers for language model experiments"
+        description="Train tokenizers using different backends and algorithms",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+
+    # Required arguments
     parser.add_argument(
         "--algorithm",
         type=str,
         required=True,
-        choices=["bpe", "unigram"],
-        help="Tokenization algorithm to use",
+        help="Tokenization algorithm to use (e.g., bpe, unigram, parity-bpe)",
     )
     parser.add_argument(
         "--vocab_size",
         type=int,
         required=True,
-        choices=[80000, 128000, 256000],
-        help="Vocabulary size",
+        help="Target vocabulary size",
     )
+
+    # Optional arguments
     parser.add_argument(
         "--data_file",
         type=str,
         default="data/raw/tokenizer_data.jsonl",
-        help="Path to training data (JSONL format)",
+        help="Path to training data (JSONL format with 'text' field)",
     )
     parser.add_argument(
         "--output_dir",
         type=str,
         default=None,
-        help="Output directory (default: tokenizers/trained/{algorithm}_v{vocab_size})",
+        help="Output directory (default: out/tokenizers/{algorithm}_v{vocab_size}k)",
     )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default=None,
+        choices=list(BACKEND_REGISTRY.keys()),
+        help="Backend to use (auto-detected from algorithm if not specified)",
+    )
+    parser.add_argument(
+        "--no_export_hf",
+        action="store_true",
+        help="Skip exporting to HuggingFace format",
+    )
+
+    # Algorithm-specific arguments
     parser.add_argument(
         "--min_frequency",
         type=int,
         default=2,
-        help="Minimum frequency for tokens (BPE only)",
+        help="Minimum frequency for tokens (BPE)",
+    )
+    parser.add_argument(
+        "--character_coverage",
+        type=float,
+        default=1.0,
+        help="Character coverage (SentencePiece, TkTkT)",
+    )
+    parser.add_argument(
+        "--phase1_merges",
+        type=int,
+        default=None,
+        help="For super-bpe variants: number of merges in phase1 (default: 60%% of vocab_size)",
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=1,
+        help="Number of worker processes for parallel processing (default: 1)",
+    )
+
+    # Parity-aware BPE specific arguments (multi-lingual)
+    parser.add_argument(
+        "--dev_file",
+        type=str,
+        default=None,
+        help="Development data JSONL with language field (alternative to ratio, for pa-bpe, pa-super-bpe)",
+    )
+    parser.add_argument(
+        "--ratio",
+        type=float,
+        nargs='*',
+        default=None,
+        help="Desired compression ratio per language (alternative to dev_file, for pa-bpe, pa-super-bpe)",
+    )
+
+    # TkTkT-specific arguments
+    parser.add_argument(
+        "--picky_threshold",
+        type=float,
+        default=0.5,
+        help="Threshold for PickyBPE (0.0-1.0, default: 0.5)",
+    )
+    parser.add_argument(
+        "--max_type_length",
+        type=int,
+        default=16,
+        help="Maximum token length for TkTkT algorithms (default: 16)",
+    )
+    parser.add_argument(
+        "--dropout_probability",
+        type=float,
+        default=0.1,
+        help="Dropout probability for BPE-dropout (default: 0.1)",
+    )
+    parser.add_argument(
+        "--initial_vocab_size",
+        type=int,
+        default=1_000_000,
+        help="Initial vocab size for KudoPiece (default: 1,000,000)",
+    )
+    parser.add_argument(
+        "--shrinking_factor",
+        type=float,
+        default=0.75,
+        help="Shrinking factor for KudoPiece (default: 0.75)",
+    )
+    parser.add_argument(
+        "--num_sub_iterations",
+        type=int,
+        default=2,
+        help="Number of sub-iterations for KudoPiece (default: 2)",
+    )
+    parser.add_argument(
+        "--ngram_n",
+        type=int,
+        default=3,
+        help="N for N-gram tokenizer (default: 3)",
     )
 
     args = parser.parse_args()
 
-    # Determine output directory
-    if args.output_dir is None:
-        vocab_size_k = args.vocab_size // 1000
-        output_dir = f"tokenizers/trained/{args.algorithm}_v{vocab_size_k}k"
-    else:
-        output_dir = args.output_dir
+    # Show available algorithms if requested
+    if args.algorithm == "list":
+        print("\nAvailable algorithms by backend:\n")
+        available = get_available_algorithms()
+        for backend_name, algos in available.items():
+            print(f"  {backend_name}:")
+            for algo in algos:
+                print(f"    - {algo}")
+        print()
+        return
 
-    print(f"\n{'='*60}")
-    print(f"Training {args.algorithm.upper()} tokenizer")
-    print(f"Vocabulary size: {args.vocab_size:,}")
-    print(f"Data file: {args.data_file}")
-    print(f"Output directory: {output_dir}")
-    print(f"{'='*60}\n")
-
-    # Train tokenizer based on algorithm
-    if args.algorithm == "bpe":
-        train_bpe_tokenizer(
-            data_file=args.data_file,
-            vocab_size=args.vocab_size,
-            output_dir=output_dir,
-            min_frequency=args.min_frequency,
-        )
-    elif args.algorithm == "unigram":
-        train_unigram_tokenizer(
-            data_file=args.data_file,
-            vocab_size=args.vocab_size,
-            output_dir=output_dir,
-        )
-
-    print(f"\n✓ Tokenizer training completed!")
+    # Train tokenizer
+    train_tokenizer(
+        algorithm=args.algorithm,
+        data_file=args.data_file,
+        vocab_size=args.vocab_size,
+        output_dir=args.output_dir,
+        backend=args.backend,
+        export_hf=not args.no_export_hf,
+        min_frequency=args.min_frequency,
+        character_coverage=args.character_coverage,
+        phase1_merges=args.phase1_merges,
+        num_workers=args.num_workers,
+        # Parity-aware BPE parameters
+        dev_file=args.dev_file,
+        ratio=args.ratio,
+        # TkTkT-specific parameters
+        picky_threshold=args.picky_threshold,
+        max_type_length=args.max_type_length,
+        dropout_probability=args.dropout_probability,
+        initial_vocab_size=args.initial_vocab_size,
+        shrinking_factor=args.shrinking_factor,
+        num_sub_iterations=args.num_sub_iterations,
+        ngram_n=args.ngram_n,
+    )
 
 
 if __name__ == "__main__":

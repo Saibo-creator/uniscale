@@ -10,6 +10,7 @@ from uniscale.tokenizers.backends.huggingface import HuggingFaceBackend
 from uniscale.tokenizers.backends.sentencepiece import SentencePieceBackend
 from uniscale.tokenizers.backends.parity_aware_bpe import ParityAwareBPEBackend
 from uniscale.tokenizers.backends.tktkt import TkTkTBackend
+from uniscale.tokenizers.backends.superbpe import SuperBPEBackend
 
 __all__ = [
     "TokenizerBackend",
@@ -17,4 +18,5 @@ __all__ = [
     "SentencePieceBackend",
     "ParityAwareBPEBackend",
     "TkTkTBackend",
+    "SuperBPEBackend",
 ]

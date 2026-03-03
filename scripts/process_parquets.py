@@ -30,6 +30,24 @@ from pathlib import Path
 import pyarrow.parquet as pq
 
 DEV_RATIO = 0.01  # 1% of rows go to dev
+MAX_CHARS = 8_000  # split texts longer than this to avoid trainer segfaults
+
+
+def split_text(text: str, max_chars: int = MAX_CHARS) -> list[str]:
+    """Split text into chunks of at most max_chars, breaking on whitespace where possible."""
+    if len(text) <= max_chars:
+        return [text]
+    chunks = []
+    while text:
+        if len(text) <= max_chars:
+            chunks.append(text)
+            break
+        split_at = text.rfind(" ", 0, max_chars)
+        if split_at == -1:
+            split_at = max_chars
+        chunks.append(text[:split_at])
+        text = text[split_at:].lstrip(" ")
+    return chunks
 
 
 def find_parquets(input_dir: Path) -> list[Path]:
@@ -44,9 +62,9 @@ def get_text(row: dict) -> str | None:
     return row.get("text") or row.get("content") or None
 
 
-def split_output_paths(output_dir: str) -> tuple[Path, Path]:
+def split_output_paths(output_dir: str) -> tuple[Path, Path, Path, Path]:
     d = Path(output_dir)
-    return d / "train.jsonl", d / "dev.jsonl"
+    return d / "train.jsonl", d / "dev.jsonl", d / "train.txt", d / "dev.txt"
 
 
 def inspect(input_dir: str) -> None:
@@ -77,13 +95,15 @@ def convert(input_dir: str, output_dir: str) -> None:
         print(f"No .parquet files found under {input_dir}")
         return
 
-    train_path, dev_path = split_output_paths(output_dir)
+    train_path, dev_path, train_txt_path, dev_txt_path = split_output_paths(output_dir)
     train_path.parent.mkdir(parents=True, exist_ok=True)
 
     train_total = dev_total = skipped = 0
 
     with open(train_path, "w", encoding="utf-8") as train_f, \
-         open(dev_path, "w", encoding="utf-8") as dev_f:
+         open(dev_path, "w", encoding="utf-8") as dev_f, \
+         open(train_txt_path, "w", encoding="utf-8") as train_txt_f, \
+         open(dev_txt_path, "w", encoding="utf-8") as dev_txt_f:
 
         for pf in parquet_files:
             language = pf.stem
@@ -100,21 +120,25 @@ def convert(input_dir: str, output_dir: str) -> None:
                 if not text or not text.strip():
                     skipped += 1
                     continue
-                record = json.dumps({"text": text.strip(), "language": language}, ensure_ascii=False) + "\n"
-                if i % dev_every == 0:
-                    dev_f.write(record)
-                    lang_dev += 1
-                else:
-                    train_f.write(record)
-                    lang_train += 1
+                chunks = split_text(text.strip())
+                for chunk in chunks:
+                    record = json.dumps({"text": chunk, "language": language}, ensure_ascii=False) + "\n"
+                    if i % dev_every == 0:
+                        dev_f.write(record)
+                        dev_txt_f.write(chunk + "\n")
+                        lang_dev += 1
+                    else:
+                        train_f.write(record)
+                        train_txt_f.write(chunk + "\n")
+                        lang_train += 1
 
             train_total += lang_train
             dev_total += lang_dev
             print(f"  {language}: {lang_train} train / {lang_dev} dev")
 
     print(f"\nDone.")
-    print(f"  train: {train_total} rows → {train_path}")
-    print(f"  dev:   {dev_total} rows → {dev_path}")
+    print(f"  train: {train_total} rows → {train_path}, {train_txt_path}")
+    print(f"  dev:   {dev_total} rows → {dev_path}, {dev_txt_path}")
     if skipped:
         print(f"  skipped {skipped} empty rows")
 
