@@ -17,13 +17,13 @@ model_sizes:
 
 # Tokenizers to use - start with 2 for comparison
 tokenizers:
-  - "out/tokenizers/bpe_v80k"
-  - "out/tokenizers/unigram_v80k"
-  # Add more when scaling up:
-  # - "out/tokenizers/bpe_v128k"
-  # - "out/tokenizers/unigram_v128k"
-  # - "out/tokenizers/bpe_v256k"
-  # - "out/tokenizers/unigram_v256k"
+  - "out/tokenizers/bpe_apertus_128k"
+  - "out/tokenizers/bpe_byte_level_128k"
+  - "out/tokenizers/bpe_gpt2_128k"
+  - "out/tokenizers/superbpe_apertus_128k"
+  - "out/tokenizers/unigram_apertus_128k"
+  - "out/tokenizers/unigram_byte_level_128k"
+  - "out/tokenizers/unigram_gpt2_128k"
 
 # Random seeds for multiple runs (3 seeds for statistical significance)
 seeds:

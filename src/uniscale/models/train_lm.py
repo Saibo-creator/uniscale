@@ -6,6 +6,7 @@ This script trains Apertus-based models of different sizes on tokenized data.
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 from typing import Optional
@@ -23,6 +24,36 @@ from transformers import (
 from transformers.integrations import WandbCallback
 
 from uniscale.models.architectures.model_config import get_apertus_config, estimate_parameters
+
+
+
+def _compute_tokenizer_fertility(tokenizer):
+    """
+    Estimate average chars/token and bytes/token from the tokenizer vocabulary,
+    excluding special tokens.  Used to convert token-level loss to char/byte PPL:
+        char_ppl  = exp(loss / chars_per_token)
+        byte_ppl  = exp(loss / bytes_per_token)
+    """
+    special_ids = set(tokenizer.all_special_ids)
+    total_chars = total_bytes = count = 0
+    for token_id in range(tokenizer.vocab_size):
+        if token_id in special_ids:
+            continue
+        token_str = tokenizer.convert_ids_to_tokens(token_id)
+        if token_str is None:
+            continue
+        try:
+            decoded = tokenizer.convert_tokens_to_string([token_str])
+        except Exception:
+            decoded = token_str
+        if not decoded:
+            continue
+        total_chars += len(decoded)
+        total_bytes += len(decoded.encode("utf-8"))
+        count += 1
+    if count == 0:
+        return 1.0, 1.0
+    return total_chars / count, total_bytes / count
 
 
 def load_tokenizer(tokenizer_path: str):
@@ -263,6 +294,15 @@ def main():
         help="Maximum number of training steps (for scaling law training)",
     )
     parser.add_argument(
+        "--tokens_per_param",
+        type=int,
+        default=None,
+        help=(
+            "Chinchilla scaling ratio: total training tokens = tokens_per_param × model_params. "
+            "max_steps is derived automatically. Mutually exclusive with --max_steps / --num_train_epochs."
+        ),
+    )
+    parser.add_argument(
         "--per_device_train_batch_size",
         type=int,
         default=8,
@@ -283,8 +323,14 @@ def main():
     parser.add_argument(
         "--warmup_steps",
         type=int,
-        default=500,
-        help="Warmup steps",
+        default=None,
+        help="Warmup steps (mutually exclusive with --warmup_ratio)",
+    )
+    parser.add_argument(
+        "--warmup_ratio",
+        type=float,
+        default=None,
+        help="Warmup ratio as a fraction of total steps, e.g. 0.01 (mutually exclusive with --warmup_steps)",
     )
     parser.add_argument(
         "--save_steps",
@@ -340,12 +386,16 @@ def main():
 
     args = parser.parse_args()
 
-    # Validate training config
-    if args.num_train_epochs is None and args.max_steps is None:
-        # Default to 3 epochs if neither specified
-        args.num_train_epochs = 3
-    elif args.num_train_epochs is not None and args.max_steps is not None:
-        raise ValueError("Specify either num_train_epochs OR max_steps, not both")
+    # Validate training config — exactly one of the three modes must be active
+    n_modes = sum([
+        args.num_train_epochs is not None,
+        args.max_steps is not None,
+        args.tokens_per_param is not None,
+    ])
+    if n_modes > 1:
+        raise ValueError("Specify only one of: --num_train_epochs, --max_steps, --tokens_per_param")
+    if n_modes == 0:
+        args.num_train_epochs = 3  # default
 
     # Get local rank for DDP (rank 0 is the main process)
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -401,8 +451,10 @@ def main():
     if is_main_process:
         print("Loading tokenizer...", flush=True)
     tokenizer = load_tokenizer(args.tokenizer_path)
+    chars_per_token, bytes_per_token = _compute_tokenizer_fertility(tokenizer)
     if is_main_process:
         print(f"Tokenizer loaded. Vocab size: {len(tokenizer)}", flush=True)
+        print(f"Tokenizer fertility: {chars_per_token:.3f} chars/token, {bytes_per_token:.3f} bytes/token", flush=True)
 
     # Get model config
     if is_main_process:
@@ -414,6 +466,24 @@ def main():
     estimated_params = estimate_parameters(config)
     if is_main_process:
         print(f"Estimated parameters: {estimated_params:,} (~{estimated_params/1e6:.1f}M)")
+
+    # Derive max_steps from Chinchilla tokens_per_param ratio
+    if args.tokens_per_param is not None:
+        world_size = int(os.environ.get("WORLD_SIZE", 1))
+        actual_tokens_per_step = (
+            args.per_device_train_batch_size
+            * args.gradient_accumulation_steps
+            * args.max_length
+            * world_size
+        )
+        total_tokens_target = args.tokens_per_param * estimated_params
+        args.max_steps = total_tokens_target // actual_tokens_per_step
+        if is_main_process:
+            print(
+                f"Chinchilla scaling: {estimated_params/1e6:.1f}M params × {args.tokens_per_param} = "
+                f"{total_tokens_target/1e9:.2f}B tokens → max_steps={args.max_steps:,} "
+                f"(tokens/step={actual_tokens_per_step:,}, world_size={world_size})"
+            )
 
     # Initialize model
     if is_main_process:
@@ -430,7 +500,14 @@ def main():
     # Falls back to standard attention if flash-attn is not installed.
     try:
         import flash_attn  # noqa: F401
-        attn_impl = "flash_attention_2"
+        # Flash Attention 2 requires compute capability >= 8.0 (Ampere+)
+        major, _ = torch.cuda.get_device_capability()
+        if major >= 8:
+            attn_impl = "flash_attention_2"
+        else:
+            attn_impl = "eager"
+            if is_main_process:
+                print(f"flash-attn installed but GPU compute capability is {major}.x (<8.0); using standard attention.")
     except ImportError:
         attn_impl = "eager"
         if is_main_process:
@@ -484,7 +561,8 @@ def main():
         "per_device_eval_batch_size": args.per_device_train_batch_size,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "learning_rate": args.learning_rate,
-        "warmup_steps": args.warmup_steps,
+        **({"warmup_ratio": args.warmup_ratio} if args.warmup_ratio is not None
+           else {"warmup_steps": args.warmup_steps or 0}),
         "logging_steps": args.logging_steps,
         "save_steps": args.save_steps,
         "save_total_limit": 3,
@@ -527,6 +605,19 @@ def main():
         eval_dataset=eval_dataset,
         data_collator=data_collator,
     )
+
+    # Patch log() to also report perplexity (terminal + wandb)
+    _original_log = trainer.log
+    def _log_with_ppl(*args, **kwargs):
+        logs = args[0]
+        for loss_key, suffix in [("loss", ""), ("eval_loss", "eval_")]:
+            if loss_key in logs:
+                loss = logs[loss_key]
+                logs[f"{suffix}ppl"]      = math.exp(min(loss, 20))
+                logs[f"{suffix}char_ppl"] = math.exp(min(loss / chars_per_token, 20))
+                logs[f"{suffix}byte_ppl"] = math.exp(min(loss / bytes_per_token, 20))
+        _original_log(*args, **kwargs)
+    trainer.log = _log_with_ppl
 
     # Train
     if is_main_process:
