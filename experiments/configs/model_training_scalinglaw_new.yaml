@@ -2,7 +2,8 @@
 # Following Chinchilla scaling: 20 tokens per parameter
 
 # Data source (parquet sub-directories)
-data_dir: "data/downstream_lm_training_data"
+# Absolute path on Clariden shared storage (a139 project allocation)
+data_dir: "/capstor/store/cscs/swissai/a139/datasets/tokenizer_training/downstream_lm_training_data"
 # First eval_docs documents from the interleaved stream are held out for eval.
 # After chunking (~40-60% yield), 3000 docs ≈ 1200-1800 eval samples.
 eval_docs: 3000
@@ -17,13 +18,13 @@ model_sizes:
 
 # Tokenizers to use - start with 2 for comparison
 tokenizers:
-  - "out/tokenizers/bpe_apertus_128k"
-  - "out/tokenizers/bpe_byte_level_128k"
-  - "out/tokenizers/bpe_gpt2_128k"
-  - "out/tokenizers/superbpe_apertus_128k"
-  - "out/tokenizers/unigram_apertus_128k"
-  - "out/tokenizers/unigram_byte_level_128k"
-  - "out/tokenizers/unigram_gpt2_128k"
+  - "/capstor/store/cscs/swissai/a139/saibo_uniscale/out/tokenizers/bpe_apertus_128k"
+  - "/capstor/store/cscs/swissai/a139/saibo_uniscale/out/tokenizers/bpe_byte_level_128k"
+  - "/capstor/store/cscs/swissai/a139/saibo_uniscale/out/tokenizers/bpe_gpt2_128k"
+  - "/capstor/store/cscs/swissai/a139/saibo_uniscale/out/tokenizers/superbpe_apertus_128k"
+  - "/capstor/store/cscs/swissai/a139/saibo_uniscale/out/tokenizers/unigram_apertus_128k"
+  - "/capstor/store/cscs/swissai/a139/saibo_uniscale/out/tokenizers/unigram_byte_level_128k"
+  - "/capstor/store/cscs/swissai/a139/saibo_uniscale/out/tokenizers/unigram_gpt2_128k"
 
 # Random seeds for multiple runs (3 seeds for statistical significance)
 seeds:

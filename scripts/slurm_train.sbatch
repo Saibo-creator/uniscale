@@ -13,9 +13,9 @@
 # SLURM Multi-Node Distributed Training Script
 # One SLURM job = one (model_size, tokenizer, seed) combination.
 #
-# Usage:
-#   sbatch scripts/slurm_train.sbatch
-#   sbatch --export=ALL,MODEL_SIZE=100M,TOKENIZER_PATH=out/tokenizers/unigram_apertus_128k scripts/slurm_train.sbatch
+# Usage (must be run from the repo root directory):
+#   sbatch --export=ALL scripts/slurm_train.sbatch
+#   sbatch --export=ALL,MODEL_SIZE=100M,TOKENIZER_PATH=/capstor/store/cscs/swissai/a139/saibo_uniscale/out/tokenizers/unigram_apertus_128k scripts/slurm_train.sbatch
 #
 # Overridable environment variables:
 #   MODEL_SIZE        - e.g. 30M, 100M, 300M
@@ -46,13 +46,13 @@ echo "Master: $MASTER_ADDR:$MASTER_PORT"
 
 # ── Experiment identity (override via --export) ──────────────────────────────
 MODEL_SIZE=${MODEL_SIZE:-"30M"}
-TOKENIZER_PATH=${TOKENIZER_PATH:-"out/tokenizers/bpe_apertus_128k"}
+TOKENIZER_PATH=${TOKENIZER_PATH:-"/capstor/store/cscs/swissai/a139/saibo_uniscale/out/tokenizers/bpe_apertus_128k"}
 SEED=${SEED:-42}
 OUTPUT_DIR=${OUTPUT_DIR:-"out/experiments"}
 CONTAINER_ENV=${CONTAINER_ENV:-"pytorch_210_env"}
 
 # ── Hyperparameters (from experiments/configs/model_training_scalinglaw_new.yaml) ──
-TRAIN_DIR="data/downstream_lm_training_data"
+TRAIN_DIR="/capstor/store/cscs/swissai/a139/datasets/tokenizer_training/downstream_lm_training_data"
 EVAL_DOCS=3000
 MAX_LENGTH=2048
 PER_DEVICE_BATCH=32
@@ -93,7 +93,7 @@ srun --environment=$CONTAINER_ENV \
      --container-mounts=/capstor/store/cscs/swissai/a139:/capstor/store/cscs/swissai/a139 \
      bash -c "
     echo '[Rank \$SLURM_PROCID / LocalRank \$SLURM_LOCALID] Starting...' && \
-    cd ~/uniscale/uniscale_code || { echo 'ERROR: cd failed'; exit 1; } && \
+    cd $SLURM_SUBMIT_DIR || { echo 'ERROR: cd to $SLURM_SUBMIT_DIR failed'; exit 1; } && \
     RANK=\$SLURM_PROCID LOCAL_RANK=\$SLURM_LOCALID $PYTHON_PATH src/uniscale/models/train_lm.py \
         --model_size $MODEL_SIZE \
         --tokenizer_path $TOKENIZER_PATH \
