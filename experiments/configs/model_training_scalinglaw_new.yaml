@@ -2,7 +2,7 @@
 # Following Chinchilla scaling: 20 tokens per parameter
 
 # Data source (parquet sub-directories)
-data_dir: "data/tokenizer_training_dataset"
+data_dir: "data/downstream_lm_training_data"
 # First eval_docs documents from the interleaved stream are held out for eval.
 # After chunking (~40-60% yield), 3000 docs ≈ 1200-1800 eval samples.
 eval_docs: 3000

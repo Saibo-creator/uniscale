@@ -82,6 +82,7 @@ echo "Seed:                     $SEED"
 echo "Output:                   $OUTPUT_DIR"
 echo "======================================================================"
 
+
 # Set Python path to pre-installed venv
 PYTHON_PATH="/iopsstor/scratch/cscs/saibogeng/venvs/uniscale/bin/python"
 echo "Using Python: $PYTHON_PATH"
@@ -89,7 +90,7 @@ echo "Using Python: $PYTHON_PATH"
 # ── Training ─────────────────────────────────────────────────────────────────
 echo "Starting distributed training..."
 srun --environment=$CONTAINER_ENV \
-     --container-mounts=/capstor/store/cscs/swissai/infra01/users/$USER:/capstor/store/cscs/swissai/infra01/users/$USER,/iopsstor/scratch/cscs/$USER:/iopsstor/scratch/cscs/$USER,/capstor/store/cscs/swissai/a139:/capstor/store/cscs/swissai/a139 \
+     --container-mounts=/capstor/store/cscs/swissai/a139:/capstor/store/cscs/swissai/a139 \
      bash -c "
     echo '[Rank \$SLURM_PROCID / LocalRank \$SLURM_LOCALID] Starting...' && \
     cd ~/uniscale/uniscale_code || { echo 'ERROR: cd failed'; exit 1; } && \
