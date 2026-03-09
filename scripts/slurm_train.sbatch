@@ -52,10 +52,10 @@ OUTPUT_DIR=${OUTPUT_DIR:-"out/experiments"}
 CONTAINER_ENV=${CONTAINER_ENV:-"pytorch_210_env"}
 
 # ── Hyperparameters (from experiments/configs/model_training_scalinglaw_new.yaml) ──
-TRAIN_DIR="data/tokenizer_training_dataset"
+TRAIN_DIR="data/downstream_lm_training_data"
 EVAL_DOCS=3000
 MAX_LENGTH=2048
-PER_DEVICE_BATCH=2
+PER_DEVICE_BATCH=32
 TOKENS_PER_STEP=262144   # target tokens consumed per optimizer step across all GPUs
 TOKENS_PER_PARAM=20      # Chinchilla ratio
 LEARNING_RATE="5e-4"
@@ -82,10 +82,14 @@ echo "Seed:                     $SEED"
 echo "Output:                   $OUTPUT_DIR"
 echo "======================================================================"
 
+# Set Python path to pre-installed venv
+PYTHON_PATH="/iopsstor/scratch/cscs/saibogeng/venvs/uniscale/bin/python"
+echo "Using Python: $PYTHON_PATH"
+
 # ── Training ─────────────────────────────────────────────────────────────────
 echo "Starting distributed training..."
 srun --environment=$CONTAINER_ENV \
-     --container-mounts=/capstor/store/cscs/swissai/infra01/users/$USER:/capstor/store/cscs/swissai/infra01/users/$USER,/iopsstor/scratch/cscs/$USER:/iopsstor/scratch/cscs/$USER \
+     --container-mounts=/capstor/store/cscs/swissai/infra01/users/$USER:/capstor/store/cscs/swissai/infra01/users/$USER,/iopsstor/scratch/cscs/$USER:/iopsstor/scratch/cscs/$USER,/capstor/store/cscs/swissai/a139:/capstor/store/cscs/swissai/a139 \
      bash -c "
     echo '[Rank \$SLURM_PROCID / LocalRank \$SLURM_LOCALID] Starting...' && \
     cd ~/uniscale/uniscale_code || { echo 'ERROR: cd failed'; exit 1; } && \
