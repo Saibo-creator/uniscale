@@ -16,6 +16,7 @@ from tokenizers import (
     pre_tokenizers,
     trainers,
     processors,
+    decoders,
 )
 from transformers import PreTrainedTokenizerFast
 
@@ -93,6 +94,7 @@ class HuggingFaceBackend(TokenizerBackend):
             tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
             tokenizer.normalizer = normalizers.Sequence([])
             tokenizer.post_processor = processors.ByteLevel(trim_offsets=False)
+            tokenizer.decoder = decoders.ByteLevel()
             print("Using ByteLevel pretokenization")
 
         elif pre_tokenizer == "apertus":
@@ -109,6 +111,7 @@ class HuggingFaceBackend(TokenizerBackend):
             ])
             tokenizer.normalizer = normalizers.Sequence([])
             tokenizer.post_processor = processors.ByteLevel(trim_offsets=True)
+            tokenizer.decoder = decoders.ByteLevel()
             print("Using Apertus style pretokenization (regex split + ByteLevel)")
 
         elif pre_tokenizer == "gpt2":
@@ -124,6 +127,7 @@ class HuggingFaceBackend(TokenizerBackend):
             ])
             tokenizer.normalizer = normalizers.Sequence([])
             tokenizer.post_processor = processors.ByteLevel(trim_offsets=True)
+            tokenizer.decoder = decoders.ByteLevel()
             print("Using GPT-2 style pretokenization (regex split + ByteLevel)")
 
         elif pre_tokenizer == "gpt4":
@@ -139,6 +143,7 @@ class HuggingFaceBackend(TokenizerBackend):
             ])
             tokenizer.normalizer = normalizers.Sequence([])
             tokenizer.post_processor = processors.ByteLevel(trim_offsets=True)
+            tokenizer.decoder = decoders.ByteLevel()
             print("Using GPT-4 style pretokenization (regex split + ByteLevel)")
 
         elif pre_tokenizer == "whitespace":
@@ -146,6 +151,7 @@ class HuggingFaceBackend(TokenizerBackend):
             tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
             tokenizer.normalizer = normalizers.Sequence([])
             tokenizer.post_processor = None
+            tokenizer.decoder = decoders.ByteLevel()
             print("Using Whitespace pretokenization")
 
         else:
@@ -172,6 +178,7 @@ class HuggingFaceBackend(TokenizerBackend):
                 max_piece_length=max_piece_length,
                 shrinking_factor=shrinking_factor,
                 n_sub_iterations=n_sub_iterations,
+                unk_token="<unk>",
             )
         else:
             raise ValueError(f"Unsupported algorithm: {algorithm}")
